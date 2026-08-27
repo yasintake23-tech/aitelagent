@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AI Asistan</string>
+    <string name="accessibility_service_desc">AI Asistanın ekranı anlaması, cihazı keşfetmesi ve sesli komutlarınızla otomatik işlemler yapması için gereklidir.</string>
+</resources>
+
