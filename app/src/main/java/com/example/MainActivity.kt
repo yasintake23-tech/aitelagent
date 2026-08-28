@@ -15,7 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.service.AiDeviceAccessibilityService
 import com.example.ui.awakening.AwakeningScreen
-import com.example.ui.chat.MainAssistantScreen
+import com.example.ui.MainAssistantScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.PureWhite
 import com.example.ui.viewmodel.AssistantViewModel

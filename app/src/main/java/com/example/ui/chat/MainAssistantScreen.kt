@@ -1,4 +1,4 @@
-package com.example.ui.chat
+package com.example.ui
 
 import android.Manifest
 import android.content.Context
@@ -91,11 +91,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.agent.core.AgentState
 import com.example.data.model.MemoryCategory
 import com.example.data.model.PersonalityTone
 import com.example.service.AiDeviceAccessibilityService
 import com.example.service.ScreenNodeData
-import com.example.ui.awakening.WhiteSpatialDepthBackground
 import com.example.ui.components.LiveScreenVisionCard
 import com.example.ui.components.MemoryInspectorSheet
 import com.example.ui.components.OrbState
@@ -113,6 +113,26 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.AssistantUiState
+
+@Composable
+private fun WhiteSpatialDepthBackground() {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val center = Offset(size.width / 2f, size.height * 0.35f)
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    PureWhite,
+                    Color(0xFFF6F8FB),
+                    Color(0xFFEFF2F7)
+                ),
+                center = center,
+                radius = size.width * 0.95f
+            ),
+            radius = size.width * 0.95f,
+            center = center
+        )
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -378,7 +398,61 @@ fun MainAssistantScreen(
                     isExploring = uiState.isAgentControlling
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
+                if (uiState.isAgentControlling || (uiState.agentState != AgentState.IDLE && !uiState.agentState.isTerminal)) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    val stateLabel: String
+                    val stateBg: Color
+                    val stateTextColor: Color
+
+                    when (uiState.agentState) {
+                        AgentState.PLANNING -> {
+                            stateLabel = "Planlanıyor"
+                            stateBg = AppleBlue.copy(alpha = 0.12f)
+                            stateTextColor = AppleBlue
+                        }
+                        AgentState.OBSERVING -> {
+                            stateLabel = "Ekran İnceleniyor"
+                            stateBg = Color(0xFF8E8E93).copy(alpha = 0.15f)
+                            stateTextColor = TextPrimary
+                        }
+                        AgentState.ACTING -> {
+                            stateLabel = "Eylem Gerçekleştiriliyor"
+                            stateBg = AppleBlue.copy(alpha = 0.15f)
+                            stateTextColor = AppleBlue
+                        }
+                        AgentState.VERIFYING -> {
+                            stateLabel = "Doğrulanıyor"
+                            stateBg = SuccessGreen.copy(alpha = 0.15f)
+                            stateTextColor = SuccessGreen
+                        }
+                        AgentState.RECOVERING -> {
+                            stateLabel = "Alternatif Yol Aranıyor"
+                            stateBg = GentleRose.copy(alpha = 0.15f)
+                            stateTextColor = Color(0xFFD32F2F)
+                        }
+                        else -> {
+                            stateLabel = "Çalışıyor"
+                            stateBg = AppleBlue.copy(alpha = 0.12f)
+                            stateTextColor = AppleBlue
+                        }
+                    }
+
+                    Surface(
+                        color = stateBg,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    ) {
+                        Text(
+                            text = stateLabel,
+                            color = stateTextColor,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
 
                 // Real-time voice transcription, agent action, or prompt dialogue
                 val displayDialogue = when {

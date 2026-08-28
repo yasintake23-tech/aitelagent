@@ -17,7 +17,9 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.agent.core.ActionVerifier
+import com.example.agent.core.AgentLifecycleManager
 import com.example.agent.core.ScreenObserver
+import com.example.agent.core.StructuredExplorationEngine
 import com.example.agent.core.VerificationResult
 import com.example.ai.AIAgentScreenReasoner
 import com.example.ai.AgentActionType
@@ -136,6 +138,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         Log.w("AiAccessibility", "AI Device Accessibility Service Interrupted")
         _isAgentActive.value = false
         _remainingTimeSeconds.value = 0
+        serviceScope.launch {
+            AgentLifecycleManager.cancelCurrentSession("Erişilebilirlik servisi kesintiye uğradı.")
+        }
     }
 
     override fun onDestroy() {
@@ -143,6 +148,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         instance = null
         _isServiceActive.value = false
         agentJob?.cancel()
+        serviceScope.launch {
+            AgentLifecycleManager.cancelCurrentSession("Erişilebilirlik servisi kapatıldı.")
+        }
     }
 
     // ----------------- Real-Time Live Screen Vision & Tree Analysis -----------------
@@ -753,209 +761,27 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         _currentTaskName.value = taskPrompt
 
         agentJob = serviceScope.launch {
-            var learnedCount = 0
-            val database = AssistantDatabase.getDatabase(context)
-            val displayMetrics = resources.displayMetrics
-            val width = displayMetrics.widthPixels.toFloat()
-            val height = displayMetrics.heightPixels.toFloat()
-
-            val visitedElements = mutableSetOf<String>()
-
-            // Save initial system configuration
-            withContext(Dispatchers.IO) {
-                database.memoryDao().insertMemory(
-                    MemoryEntryEntity(
-                        category = MemoryCategory.SYSTEM.name,
-                        key = "Ekran Yapısı ve Çözünürlük",
-                        value = "${displayMetrics.widthPixels}x${displayMetrics.heightPixels} @ ${displayMetrics.densityDpi} DPI",
-                        importance = 2,
-                        timestamp = System.currentTimeMillis()
-                    )
-                )
-            }
-            learnedCount++
-
             try {
-                onStatusUpdate("AI Asistanı canlı insan gözü ve ekran kontrolünü devraldı...")
-                pressHome()
-                awaitScreenSettled(1500L)
-
-                var step = 0
-                val startTime = System.currentTimeMillis()
-                val endTime = startTime + (totalSeconds * 1000L)
-
-                while (isActive && System.currentTimeMillis() < endTime) {
-                    step++
-                    val currentRemaining = ((endTime - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0)
-                    _remainingTimeSeconds.value = currentRemaining
-
-                    val snapshot = updateLiveSnapshot()
-                    val existingMemories = withContext(Dispatchers.IO) {
-                        database.memoryDao().getAllMemoriesOnce()
+                StructuredExplorationEngine.executeExploration(
+                    context = context,
+                    service = this@AiDeviceAccessibilityService,
+                    durationMinutes = durationMinutes,
+                    taskPrompt = taskPrompt,
+                    reasoner = reasoner,
+                    profile = profile,
+                    onCountdownTick = { remaining ->
+                        _remainingTimeSeconds.value = remaining
+                    },
+                    onStatusUpdate = onStatusUpdate,
+                    onFinished = { learned ->
+                        _discoveredCount.value = learned
+                        onFinished(learned)
                     }
-
-                    // Capture live screenshot for Visual Grounding multimodal reasoning
-                    val screenshot = captureLiveScreenshotAsync()
-
-                    // 1. If we have the AI Agent Screen Reasoner, let the AI Model decide
-                    if (reasoner != null) {
-                        onStatusUpdate("Ekran görüntüsü inceleniyor...")
-                        val decision = reasoner.decideNextScreenAction(
-                            snapshot = snapshot,
-                            taskPrompt = taskPrompt,
-                            stepNumber = step,
-                            visitedElements = visitedElements,
-                            memories = existingMemories,
-                            profile = profile,
-                            liveScreenshot = screenshot
-                        )
-
-                        onStatusUpdate(decision.speechStatus)
-
-                        // Save any discovered insight into memory
-                        if (!decision.memoryKey.isNullOrBlank() && !decision.memoryValue.isNullOrBlank()) {
-                            withContext(Dispatchers.IO) {
-                                database.memoryDao().insertMemory(
-                                    MemoryEntryEntity(
-                                        category = MemoryCategory.PREFERENCE.name,
-                                        key = decision.memoryKey,
-                                        value = decision.memoryValue,
-                                        importance = 1,
-                                        timestamp = System.currentTimeMillis()
-                                    )
-                                )
-                                val updatedMemories = database.memoryDao().getAllMemoriesOnce()
-                                MemoryFileManager.exportMemoryToDownloads(context, profile, updatedMemories)
-                            }
-                            learnedCount++
-                            _discoveredCount.value = learnedCount
-                        }
-
-                        // Execute the AI's chosen action with Action-Verification loop
-                        when (decision.actionType) {
-                            AgentActionType.TASK_COMPLETE -> {
-                                val summary = decision.completionSummary.ifBlank { "Görev başarıyla tamamlandı." }
-                                onStatusUpdate(summary)
-                                break
-                            }
-
-                            AgentActionType.CLICK_COORD, AgentActionType.CLICK_NODE -> {
-                                val targetNode = if (decision.targetIndex in snapshot.clickableNodes.indices) {
-                                    snapshot.clickableNodes[decision.targetIndex]
-                                } else null
-
-                                val coords = decision.coordinates ?: targetNode?.let {
-                                    PointF(it.bounds.centerX().toFloat(), it.bounds.centerY().toFloat())
-                                }
-
-                                if (coords != null) {
-                                    if (decision.targetText.isNotBlank()) {
-                                        visitedElements.add(decision.targetText.lowercase(Locale("tr", "TR")))
-                                    }
-                                    clickAtWithVerification(coords.x, coords.y, decision.targetText, targetNode = targetNode)
-                                    awaitScreenSettled(1500L)
-                                } else {
-                                    delay(1000)
-                                }
-                            }
-
-                            AgentActionType.SWIPE_DOWN -> {
-                                swipeDownAsync()
-                            }
-
-                            AgentActionType.SWIPE_UP -> {
-                                swipeUpAsync()
-                            }
-
-                            AgentActionType.OPEN_APP -> {
-                                if (decision.appName.isNotBlank()) {
-                                    findAndOpenAppVisually(decision.appName, profile?.customApiKey ?: "", 5) { msg ->
-                                        onStatusUpdate(msg)
-                                    }
-                                }
-                            }
-
-                            AgentActionType.TYPE_TEXT -> {
-                                if (decision.textToType.isNotBlank()) {
-                                    typeTextIntoNode(decision.textToType)
-                                    awaitScreenSettled(1200L)
-                                }
-                            }
-
-                            AgentActionType.PRESS_BACK -> {
-                                goBack()
-                                awaitScreenSettled(1200L)
-                            }
-
-                            AgentActionType.PRESS_HOME -> {
-                                goHome()
-                                awaitScreenSettled(1200L)
-                            }
-
-                            AgentActionType.OPEN_QUICK_SETTINGS -> {
-                                openQuickSettings()
-                                awaitScreenSettled(1200L)
-                            }
-
-                            AgentActionType.OPEN_NOTIFICATIONS -> {
-                                openNotifications()
-                                awaitScreenSettled(1200L)
-                            }
-
-                            AgentActionType.VOLUME_UP -> {
-                                volumeUp()
-                                delay(600)
-                            }
-
-                            AgentActionType.VOLUME_DOWN -> {
-                                volumeDown()
-                                delay(600)
-                            }
-
-                            AgentActionType.SWIPE_LEFT -> {
-                                swipeLeftAsync()
-                            }
-
-                            AgentActionType.SWIPE_RIGHT -> {
-                                swipeRightAsync()
-                            }
-
-                            else -> {
-                                delay(1500)
-                            }
-                        }
-                    } else {
-                        // Fallback Heuristic loop
-                        if (step % 2 == 1) {
-                            swipeDownAsync()
-                        } else {
-                            pressBack()
-                            awaitScreenSettled(1200L)
-                        }
-                    }
-
-                    for (i in 0 until 2) {
-                        if (!isActive) break
-                        delay(600)
-                        val rem = ((endTime - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0)
-                        _remainingTimeSeconds.value = rem
-                    }
-                }
-
-                pressHome()
-                // Final export of memories
-                withContext(Dispatchers.IO) {
-                    val allMem = database.memoryDao().getAllMemoriesOnce()
-                    MemoryFileManager.exportMemoryToDownloads(context, profile, allMem)
-                }
-
-                onStatusUpdate("Keşif oturumu tamamlandı! Toplam $learnedCount yeni bilgi hafızaya alındı.")
-                onFinished(learnedCount)
-
+                )
             } catch (e: Exception) {
                 Log.e("AiAccessibility", "Agent execution error", e)
                 onStatusUpdate("İşlem sırasında duraklatıldı: ${e.localizedMessage}")
-                onFinished(learnedCount)
+                onFinished(0)
             } finally {
                 _isAgentActive.value = false
                 _remainingTimeSeconds.value = 0
@@ -967,6 +793,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         agentJob?.cancel()
         _isAgentActive.value = false
         _remainingTimeSeconds.value = 0
+        serviceScope.launch {
+            AgentLifecycleManager.cancelCurrentSession("Kullanıcı tarafından durduruldu.")
+        }
     }
 
     companion object {

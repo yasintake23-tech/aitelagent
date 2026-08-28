@@ -7,6 +7,11 @@ import android.os.Build
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.agent.core.AgentLifecycleManager
+import com.example.agent.core.AgentState
+import com.example.agent.core.AgentTaskSession
+import com.example.agent.core.IntentRouter
+import com.example.agent.core.UserIntent
 import com.example.ai.AIProvider
 import com.example.ai.AIProviderManager
 import com.example.ai.ProviderValidationResult
@@ -160,12 +165,29 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         viewModelScope.launch {
-            AiDeviceAccessibilityService.isAgentActive.collect { active ->
+            AgentLifecycleManager.agentState.collect { state ->
+                val active = !state.isTerminal && state != AgentState.IDLE
                 _isAgentControlling.value = active
                 if (active) {
                     _orbState.value = OrbState.THINKING
                 } else if (!_isGenerating.value && !_isVoiceListening.value && !_isVoiceSpeaking.value) {
                     _orbState.value = OrbState.IDLE
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            AgentLifecycleManager.statusText.collect { status ->
+                if (status.isNotBlank()) {
+                    _explorationStatusText.value = status
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            AgentLifecycleManager.currentSession.collect { session ->
+                if (session != null && session.taskGoal.isNotBlank()) {
+                    _currentTaskName.value = session.taskGoal
                 }
             }
         }
@@ -179,12 +201,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             AiDeviceAccessibilityService.totalControlDurationSeconds.collect { tot ->
                 _totalControlSeconds.value = tot
-            }
-        }
-
-        viewModelScope.launch {
-            AiDeviceAccessibilityService.currentTaskName.collect { task ->
-                _currentTaskName.value = task
             }
         }
 
@@ -226,7 +242,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _error,
         AiDeviceAccessibilityService.liveScreenSnapshot,
         AiDeviceAccessibilityService.liveScreenshotBitmap,
-        AiDeviceAccessibilityService.virtualFingerState
+        AiDeviceAccessibilityService.virtualFingerState,
+        AgentLifecycleManager.agentState,
+        AgentLifecycleManager.currentSession
     ) { params ->
         val (profile, memories, messages) = params[0] as Triple<UserProfileEntity?, List<MemoryEntryEntity>, List<ChatMessageEntity>>
         val isGenerating = params[1] as Boolean
@@ -245,6 +263,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val liveSnapshot = params[14] as ScreenSnapshot
         val liveScreenshot = params[15] as Bitmap?
         val virtualFinger = params[16] as VirtualFingerState?
+        val agentState = params[17] as AgentState
+        val agentTaskSession = params[18] as AgentTaskSession?
 
         val activeProvider = profile?.preferredAiProvider ?: "gemini"
         val availableModels = aiProviderManager.getAvailableModels(activeProvider)
@@ -262,6 +282,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             isVoiceSpeaking = isVoiceSpeaking,
             isContinuousListening = isContinuousListening,
             isAgentControlling = isAgentControlling,
+            agentState = agentState,
+            agentTaskSession = agentTaskSession,
             remainingControlSeconds = remainingControlSeconds,
             totalControlSeconds = _totalControlSeconds.value,
             currentTaskName = _currentTaskName.value,
@@ -333,82 +355,96 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun handleSpokenCommand(command: String) {
-        val lower = command.lowercase(Locale("tr", "TR")).trim()
+        // On any new command, interrupt ongoing speech to prevent overlap
+        stopSpeaking()
 
-        // 1. Stop / Cancel commands
-        if (lower == "durdur" || lower == "iptal" || lower.contains("kontrolü bırak") || lower.contains("dur artık") || lower == "sus") {
+        val classification = IntentRouter.classifyIntent(command)
+
+        // 1. Explicit Stop / Cancel commands
+        if (classification.isExplicitCancel) {
+            IntentRouter.logRoutingDecision(command, classification, agentStarted = false)
             stopAutonomousDeviceControl()
-            stopSpeaking()
             speakText("Kontrol ve tüm işlemler durduruldu.")
             return
         }
 
-        // On any new command, interrupt ongoing speech & stop prior autonomous tasks to prevent dual execution
-        stopSpeaking()
+        // If previously controlling and receiving a new non-stop command, clean up prior task first
         if (_isAgentControlling.value) {
             stopAutonomousDeviceControl()
         }
 
-        // 2. Autonomous Device Exploration ("Keşfet", "30 dk kontrol et", "telefonu gez", etc.)
-        val parsedMinutes = extractDurationMinutes(lower)
-        if (parsedMinutes != null || lower.contains("kontrol et") || lower.contains("keşfet") || lower.contains("telefonu gez") || lower.contains("kurcala") || lower.contains("cihazı incele")) {
-            val minutes = parsedMinutes ?: 30
-            startAutonomousDeviceControl(minutes, "Cihazı Keşfet ($minutes dk)")
-            return
-        }
+        when (classification.intent) {
+            UserIntent.EXPLORATION_TASK -> {
+                IntentRouter.logRoutingDecision(command, classification, agentStarted = true)
+                val minutes = classification.durationMinutes ?: 15
+                startAutonomousDeviceControl(minutes, "Cihazı Keşfet ($minutes dk)")
+            }
 
-        val isAccessibilityActive = _isAccessibilityEnabled.value || AiDeviceAccessibilityService.isServiceActive.value
-
-        // 3. Smart Intent & Full Intelligent Device Navigation Routing
-        if (isAccessibilityActive || DeviceAgentExecutor.isDeviceActionOrScreenIntent(command)) {
-            viewModelScope.launch {
-                // Pause speech listening during autonomous execution to avoid mic feedback loop
-                voiceManager?.stopListening()
-
-                _orbState.value = OrbState.THINKING
-                _isAgentControlling.value = true
-                _currentTaskName.value = command
-                _explorationStatusText.value = "Görev analiz ediliyor..."
-
-                val execResult = DeviceAgentExecutor.executeSmartAutonomousTask(
-                    context = getApplication(),
-                    command = command,
-                    reasoner = screenReasoner,
-                    onStatusUpdate = { status ->
-                        _explorationStatusText.value = status
+            UserIntent.DEVICE_TASK -> {
+                val isAccessibilityActive = _isAccessibilityEnabled.value || AiDeviceAccessibilityService.isServiceActive.value
+                if (!isAccessibilityActive) {
+                    IntentRouter.logRoutingDecision(command, classification, agentStarted = false)
+                    val feedback = "Bu cihaz işlemini gerçekleştirebilmem için Ayarlar'dan Erişilebilirlik iznini açmanız gerekiyor."
+                    speakText(feedback)
+                    viewModelScope.launch {
+                        chatRepository.sendUserMessage(command)
+                        chatRepository.saveAssistantMessage(feedback)
                     }
-                )
+                    return
+                }
 
-                _isAgentControlling.value = false
-                _orbState.value = OrbState.IDLE
+                IntentRouter.logRoutingDecision(command, classification, agentStarted = true)
+                viewModelScope.launch {
+                    // Pause speech listening during autonomous execution to avoid mic feedback loop
+                    voiceManager?.stopListening()
 
-                if (execResult.isSuccess || execResult.actionType != "DELEGATE_TO_AI_MODEL") {
-                    if (execResult.speechFeedback.isNotEmpty()) {
-                        speakText(execResult.speechFeedback)
+                    // ONLY transition UI to agent mode after intent has been strictly validated
+                    _orbState.value = OrbState.THINKING
+                    _isAgentControlling.value = true
+                    _currentTaskName.value = command
+                    _explorationStatusText.value = "Görev analiz ediliyor..."
+
+                    val execResult = DeviceAgentExecutor.executeSmartAutonomousTask(
+                        context = getApplication(),
+                        command = command,
+                        reasoner = screenReasoner,
+                        onStatusUpdate = { status ->
+                            _explorationStatusText.value = status
+                        }
+                    )
+
+                    _isAgentControlling.value = false
+                    _orbState.value = OrbState.IDLE
+
+                    if (execResult.isSuccess || execResult.actionType != "DELEGATE_TO_AI_MODEL") {
+                        if (execResult.speechFeedback.isNotEmpty()) {
+                            speakText(execResult.speechFeedback)
+                        }
+                        // Save interaction to chat repository
+                        chatRepository.sendUserMessage(command)
+                        chatRepository.saveAssistantMessage(execResult.speechFeedback)
+                    } else {
+                        // Not a device navigation action -> Fallback cleanly to conversation
+                        sendMessage(command, speakResponse = true)
                     }
-                    // Save interaction to chat repository
-                    chatRepository.sendUserMessage(command)
-                    chatRepository.saveAssistantMessage(execResult.speechFeedback)
-                } else {
-                    // Not a device navigation action -> Process as intelligent conversation / reasoning query
-                    sendMessage(command)
                 }
             }
-        } else {
-            // Pure conversational request when accessibility is off
-            sendMessage(command)
-        }
-    }
 
-    private fun extractDurationMinutes(text: String): Int? {
-        val regex = Regex("(\\d+)\\s*(dakika|dk|min|saat|hour)")
-        val match = regex.find(text) ?: return null
-        val num = match.groupValues[1].toIntOrNull() ?: return null
-        val unit = match.groupValues[2]
-        return if (unit.startsWith("saat") || unit.startsWith("hour")) {
-            num * 60
-        } else {
-            num
+            UserIntent.AMBIGUOUS -> {
+                IntentRouter.logRoutingDecision(command, classification, agentStarted = false)
+                val clarification = "Tam olarak ne yapmak istediğinizi anlayamadım. Bir uygulama açmamı, mesaj göndermemi veya cihazda bir işlem yapmamı ister misiniz?"
+                speakText(clarification)
+                viewModelScope.launch {
+                    chatRepository.sendUserMessage(command)
+                    chatRepository.saveAssistantMessage(clarification)
+                }
+            }
+
+            UserIntent.CONVERSATIONAL -> {
+                IntentRouter.logRoutingDecision(command, classification, agentStarted = false)
+                // Pure conversational interaction -> Never triggers agent mode or live screen navigation
+                sendMessage(command, speakResponse = true)
+            }
         }
     }
 
@@ -453,6 +489,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun stopAutonomousDeviceControl() {
+        viewModelScope.launch {
+            AgentLifecycleManager.cancelCurrentSession("Kullanıcı tarafından durduruldu.")
+        }
         AiDeviceAccessibilityService.instance?.stopAgentControl()
         _isAgentControlling.value = false
         _remainingControlSeconds.value = 0
@@ -472,7 +511,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _error.value = null
     }
 
-    fun sendMessage(userText: String) {
+    fun sendMessage(userText: String, speakResponse: Boolean = false) {
         if (userText.isBlank() || _isGenerating.value) return
 
         // If a new user command or query is sent, immediately interrupt/flush previous speech
@@ -523,8 +562,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val finalMessage = fullResponse.toString().trim()
                 chatRepository.saveAssistantMessage(finalMessage)
 
-                // 2. ONLY when generation is 100% complete, send the final complete text to TTS once
-                if (_isContinuousListening.value && finalMessage.isNotEmpty()) {
+                // 2. ONLY when generation is 100% complete, send the final complete text to TTS once if requested or in continuous mode
+                if ((speakResponse || _isContinuousListening.value) && finalMessage.isNotEmpty()) {
                     speakText(finalMessage, isAppend = false)
                 }
 
@@ -532,7 +571,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 val errorMsg = "Üzgünüm, yanıt oluşturulurken bir hata oluştu: ${e.localizedMessage}"
                 chatRepository.saveAssistantMessage(errorMsg)
                 _error.value = "Hata: ${e.localizedMessage}"
-                if (_isContinuousListening.value) {
+                if (speakResponse || _isContinuousListening.value) {
                     speakText("Bir hata oluştu.", isAppend = false)
                 }
             } finally {

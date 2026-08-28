@@ -1,6 +1,8 @@
 package com.example.ui.viewmodel
 
 import android.graphics.Bitmap
+import com.example.agent.core.AgentState
+import com.example.agent.core.AgentTaskSession
 import com.example.data.model.ChatMessageEntity
 import com.example.data.model.MemoryEntryEntity
 import com.example.data.model.UserProfileEntity
@@ -20,6 +22,8 @@ data class AssistantUiState(
     val isVoiceSpeaking: Boolean = false,
     val isContinuousListening: Boolean = true,
     val isAgentControlling: Boolean = false,
+    val agentState: AgentState = AgentState.IDLE,
+    val agentTaskSession: AgentTaskSession? = null,
     val remainingControlSeconds: Int = 0,
     val totalControlSeconds: Int = 120,
     val currentTaskName: String = "Cihazı Keşfet",

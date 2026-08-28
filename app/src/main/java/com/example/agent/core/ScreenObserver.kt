@@ -113,4 +113,18 @@ object ScreenObserver {
             editableNodes = editableList
         )
     }
+
+    /**
+     * Verilen ScreenSnapshot için deterministik SHA-256 ekran parmak izi (fingerprint) üretir.
+     */
+    fun computeFingerprint(snapshot: ScreenSnapshot): String {
+        return ScreenFingerprintGenerator.generateFingerprint(snapshot).value
+    }
+
+    /**
+     * Verilen ScreenSnapshot için yapılandırılmış ScreenFingerprint nesnesi üretir.
+     */
+    fun computeScreenFingerprint(snapshot: ScreenSnapshot): ScreenFingerprint {
+        return ScreenFingerprintGenerator.generateFingerprint(snapshot)
+    }
 }

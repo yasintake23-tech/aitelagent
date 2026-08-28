@@ -9,11 +9,14 @@ import android.os.Build
 import android.util.Log
 import com.example.BuildConfig
 import com.example.agent.core.ActionVerifier
+import com.example.agent.core.AgentLifecycleManager
 import com.example.agent.core.AgentState
 import com.example.agent.core.AgentTaskSession
+import com.example.agent.core.IntentRouter
 import com.example.agent.core.RecoveryActionType
 import com.example.agent.core.RecoveryStrategy
 import com.example.agent.core.TaskBudget
+import com.example.agent.core.UserIntent
 import com.example.agent.core.VerificationResult
 import com.example.ai.AIAgentScreenReasoner
 import com.example.ai.AgentActionType
@@ -370,28 +373,66 @@ object DeviceAgentExecutor {
             )
         }
 
+        val budget = TaskBudget(
+            maxSteps = 6,
+            maxRetriesPerStep = 2,
+            overallTimeoutMs = 120_000L
+        )
+
+        val taskSession = AgentLifecycleManager.startSession(
+            taskGoal = "WhatsApp: $contactName kişisine mesaj gönder",
+            budget = budget,
+            initialState = AgentState.PLANNING
+        )
+
+        fun checkCancelled(): Boolean {
+            val active = AgentLifecycleManager.currentSession.value
+            return active == null || active.taskId != taskSession.taskId || active.isCancelled || active.isFinished
+        }
+
         // Step 1: Open WhatsApp Purely Visually (No Intent)
+        if (checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 1")
+        }
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 1, "Ana ekranda WhatsApp aranıyor...")
         onStepUpdate?.invoke("Ana ekrandan WhatsApp simgesi görsel olarak aranıyor...")
+
+        val step1ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 1, "WhatsApp başlatılıyor...")
+        if (!step1ActingOk || checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before WhatsApp launch action")
+        }
+
         val appOpened = service.findAndOpenAppVisually("WhatsApp", BuildConfig.GEMINI_API_KEY, 6) { status ->
             onStepUpdate?.invoke(status)
         }
 
-        if (!appOpened) {
+        if (!appOpened || checkCancelled()) {
+            val msg = if (checkCancelled()) "İşlem iptal edildi." else "Ana ekranda WhatsApp simgesi bulunamadı."
+            if (checkCancelled()) AgentLifecycleManager.cancelCurrentSession(msg) else AgentLifecycleManager.failSession(taskSession.taskId, msg)
             return@withContext AgentExecutionResult(
                 isSuccess = false,
-                actionType = "WHATSAPP_NOT_FOUND",
-                speechFeedback = "Ana ekranda WhatsApp simgesi bulunamadı.",
-                technicalLog = "Could not visually locate WhatsApp icon"
+                actionType = if (checkCancelled()) "CANCELLED" else "WHATSAPP_NOT_FOUND",
+                speechFeedback = msg,
+                technicalLog = "Could not visually locate WhatsApp icon or cancelled"
             )
         }
 
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.VERIFYING, 1, "WhatsApp ekranı kontrol ediliyor...")
         service.awaitScreenSettled(1800L, 400L)
 
         // Step 2: Visually locate Search icon
+        if (checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 2")
+        }
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 2, "Arama simgesi aranıyor...")
         onStepUpdate?.invoke("WhatsApp içinde arama simgesi aranıyor...")
         var searchScreenshot = service.captureLiveScreenshotAsync()
         var searchSnapshot = service.updateLiveSnapshot()
 
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.PLANNING, 2, "Arama butonu konumlandırılıyor...")
         var searchGrounding = VisualGroundingEngine.locateTargetOnScreen(
             apiKey = BuildConfig.GEMINI_API_KEY,
             bitmap = searchScreenshot,
@@ -402,25 +443,44 @@ object DeviceAgentExecutor {
             searchContext = "WhatsApp üst çubuğundaki arama büyüteç butonunu bul"
         )
 
+        val step2ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 2, "Arama butonuna dokunuluyor...")
+        if (!step2ActingOk || checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before search click")
+        }
         if (searchGrounding.found && (searchGrounding.targetNode != null || searchGrounding.targetX > 0)) {
             service.clickAtWithVerification(searchGrounding.targetX, searchGrounding.targetY, "Arama", targetNode = searchGrounding.targetNode)
         } else {
-            // Fallback node click
             service.findAndClickMatching("ara")
         }
 
         service.awaitScreenSettled(1000L, 300L)
 
         // Step 3: Type contact name
+        if (checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 3")
+        }
+        val step3ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 3, "Kişi yazılıyor: $contactName")
+        if (!step3ActingOk || checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before contact type action")
+        }
         onStepUpdate?.invoke("Kişi yazılıyor: $contactName")
         service.typeTextIntoNode(contactName)
         service.awaitScreenSettled(1400L, 400L)
 
         // Step 4: Visually locate and select contact in search results
+        if (checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 4")
+        }
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 4, "Arama sonuçları inceleniyor...")
         onStepUpdate?.invoke("Kişi seçiliyor: $contactName")
         val contactScreenshot = service.captureLiveScreenshotAsync()
         val contactSnapshot = service.updateLiveSnapshot()
 
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.PLANNING, 4, "$contactName kişisi konumlandırılıyor...")
         val contactGrounding = VisualGroundingEngine.locateTargetOnScreen(
             apiKey = BuildConfig.GEMINI_API_KEY,
             bitmap = contactScreenshot,
@@ -431,12 +491,16 @@ object DeviceAgentExecutor {
             searchContext = "Arama sonuçlarında $contactName adlı kişiyi bul ve tıkla"
         )
 
+        val step4ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 4, "$contactName seçiliyor...")
+        if (!step4ActingOk || checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before contact click action")
+        }
         if (contactGrounding.found && (contactGrounding.targetNode != null || contactGrounding.targetX > 0)) {
             service.clickAtWithVerification(contactGrounding.targetX, contactGrounding.targetY, contactName, targetNode = contactGrounding.targetNode)
         } else {
             val contactClicked = service.findAndClickMatching(contactName)
             if (!contactClicked) {
-                // Click first result item in list
                 val firstResult = contactSnapshot.clickableNodes.firstOrNull { it.bounds.centerY() in 200..1000 }
                 if (firstResult != null) {
                     service.clickAtWithVerification(firstResult.bounds.centerX().toFloat(), firstResult.bounds.centerY().toFloat(), contactName, targetNode = firstResult)
@@ -447,10 +511,18 @@ object DeviceAgentExecutor {
         service.awaitScreenSettled(1800L, 400L)
 
         // Step 5: Type message into chat box
+        if (checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 5")
+        }
+        val step5ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 5, "Mesaj yazılıyor...")
+        if (!step5ActingOk || checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before message type action")
+        }
         onStepUpdate?.invoke("Mesaj yazılıyor...")
         val typed = service.typeTextIntoNode(message)
         if (!typed) {
-            // Locate message field visually
             val msgScreenshot = service.captureLiveScreenshotAsync()
             val msgSnapshot = service.updateLiveSnapshot()
             val msgGrounding = VisualGroundingEngine.locateTargetOnScreen(
@@ -471,6 +543,11 @@ object DeviceAgentExecutor {
         service.awaitScreenSettled(1000L, 300L)
 
         // Step 6: Visually locate and click Send button
+        if (checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 6")
+        }
+        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 6, "Gönder butonu kontrol ediliyor...")
         onStepUpdate?.invoke("Gönder butonuna dokunuluyor...")
         val sendScreenshot = service.captureLiveScreenshotAsync()
         val sendSnapshot = service.updateLiveSnapshot()
@@ -485,6 +562,11 @@ object DeviceAgentExecutor {
             searchContext = "Sohbetin sağ altındaki yeşil dairesel Gönder / Send butonunu bul"
         )
 
+        val step6ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 6, "Gönder butonuna dokunuluyor...")
+        if (!step6ActingOk || checkCancelled()) {
+            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
+            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before send click action")
+        }
         if (sendGrounding.found && (sendGrounding.targetNode != null || sendGrounding.targetX > 0)) {
             service.clickAtWithVerification(sendGrounding.targetX, sendGrounding.targetY, "Gönder", targetNode = sendGrounding.targetNode)
         } else {
@@ -493,33 +575,24 @@ object DeviceAgentExecutor {
 
         service.awaitScreenSettled(1000L, 300L)
 
+        val summary = "$contactName kişisine “$message” mesajı başarıyla gönderildi."
+        AgentLifecycleManager.completeSession(taskSession.taskId, summary)
+
         return@withContext AgentExecutionResult(
             isSuccess = true,
             actionType = "WHATSAPP_AUTOMATION_VISUAL",
-            speechFeedback = "$contactName kişisine “$message” mesajı başarıyla gönderildi.",
+            speechFeedback = summary,
             technicalLog = "Pure visual human-like WhatsApp message automation completed for '$contactName'"
         )
     }
 
     /**
      * Checks if user text requires device action, gesture, app control or screen reading.
+     * Uses IntentRouter to prevent false positives for conversational inputs like "merhaba".
      */
     fun isDeviceActionOrScreenIntent(text: String): Boolean {
-        val lower = text.lowercase(Locale("tr", "TR")).trim()
-        val actionTriggers = listOf(
-            "aç", "başlat", "çalıştır", "gir", "baksana", "kapat",
-            "tıkla", "bas", "dokun", "seç", "yaz", "gönder", "mesaj",
-            "kaydır", "aşağı", "yukarı", "sağa", "sola", "home", "ana sayfa", "ana ekran", "geri", "back",
-            "ses", "sesi", "ses aç", "ses kıs", "sesi aç", "sesi kıs", "sesi artır", "sesi azalt", "sesi yükselt", "sesi düşür",
-            "hızlı panel", "hızlı ayarlar", "hızlı ayarları", "quick settings", "kontrol paneli", "bildirim", "bildirimler", "bildirim paneli",
-            "ekranı oku", "ekranda ne var", "ekranı incele", "ekrana bak", "ekranı tara", "görsel",
-            "whatsapp", "wp", "instagram", "youtube", "galeri", "kamera", "ayarlar", "rehber", "sms",
-            "keşfet", "kontrol et", "cihazı incele", "kurcala", "telefonu gez", "durdur", "iptal", "sus",
-            "ara", "bul", "göster", "gezin", "gez", "oyna", "oynat", "oku", "araştır",
-            "müzik", "şarkı", "video", "fotoğraf", "resim", "harita", "hesap", "not", "telefon", "arama",
-            "chrome", "tarayıcı", "web", "google", "mail", "eposta", "bluetooth", "wifi", "fener", "flaş", "tema", "mod"
-        )
-        return actionTriggers.any { lower.contains(it) }
+        val result = IntentRouter.classifyIntent(text)
+        return result.intent == UserIntent.DEVICE_TASK || result.intent == UserIntent.EXPLORATION_TASK
     }
 
     /**
@@ -551,10 +624,10 @@ object DeviceAgentExecutor {
             maxConsecutiveFailures = 3
         )
 
-        var taskSession = AgentTaskSession(
+        var taskSession = AgentLifecycleManager.startSession(
             taskGoal = goalPrompt,
             budget = budget,
-            currentState = AgentState.IDLE
+            initialState = AgentState.PLANNING
         )
 
         val visitedElements = mutableSetOf<String>()
@@ -570,23 +643,34 @@ object DeviceAgentExecutor {
         onStatusUpdate?.invoke("Ekran inceleniyor ve adımlar planlanıyor...")
 
         while (!taskSession.isFinished && currentStep <= budget.maxSteps) {
+            // Check if cancelled externally
+            val loopStartSession = AgentLifecycleManager.currentSession.value
+            if (loopStartSession == null || loopStartSession.taskId != taskSession.taskId || loopStartSession.isCancelled) {
+                taskSession = taskSession.copy(currentState = AgentState.CANCELLED, isCancelled = true)
+                break
+            }
+
             // Overall timeout check
             if (taskSession.isTimedOut()) {
                 Log.w(TAG, "Task timed out after ${System.currentTimeMillis() - taskSession.startTimeMs} ms")
+                val timeoutMsg = "Görev toplam zaman aşımına ulaştı (${budget.overallTimeoutMs / 1000} sn)."
                 taskSession = taskSession.copy(
                     currentState = AgentState.FAILED,
-                    errorMessage = "Görev toplam zaman aşımına ulaştı (${budget.overallTimeoutMs / 1000} sn)."
+                    errorMessage = timeoutMsg
                 )
+                AgentLifecycleManager.failSession(taskSession.taskId, timeoutMsg)
                 break
             }
 
             // 1. OBSERVING
             taskSession = taskSession.copy(currentState = AgentState.OBSERVING, currentStep = currentStep)
+            AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, currentStep, "Ekran inceleniyor...")
             val screenshot = service.captureLiveScreenshotAsync()
             val snapshot = service.updateLiveSnapshot()
 
             // 2. PLANNING
             taskSession = taskSession.copy(currentState = AgentState.PLANNING)
+            AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.PLANNING, currentStep, "Planlanıyor...")
             val decision = reasoner.decideNextScreenAction(
                 snapshot = snapshot,
                 taskPrompt = goalPrompt,
@@ -608,11 +692,22 @@ object DeviceAgentExecutor {
                     currentState = AgentState.COMPLETED,
                     resultSummary = finalSummary
                 )
+                AgentLifecycleManager.completeSession(taskSession.taskId, finalSummary)
                 break
             }
 
             // 3. ACTING
             taskSession = taskSession.copy(currentState = AgentState.ACTING)
+            val actingStatus = if (decision.thought.isNotBlank()) decision.thought else "Eylem gerçekleştiriliyor..."
+            val actingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, currentStep, actingStatus)
+            val preActSession = AgentLifecycleManager.currentSession.value
+
+            if (!actingOk || preActSession == null || preActSession.taskId != taskSession.taskId || preActSession.isCancelled || preActSession.isFinished) {
+                Log.w(TAG, "Task cancelled/invalid before physical action execution. Aborting physical action.")
+                taskSession = taskSession.copy(currentState = AgentState.CANCELLED, isCancelled = true)
+                break
+            }
+
             var verificationResult: VerificationResult? = null
             var targetNode = if (decision.targetIndex in snapshot.clickableNodes.indices) {
                 snapshot.clickableNodes[decision.targetIndex]
@@ -736,9 +831,11 @@ object DeviceAgentExecutor {
             if (vResult.isSuccess) {
                 consecutiveFailures = 0
                 taskSession = taskSession.copy(currentState = AgentState.VERIFYING)
+                AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.VERIFYING, currentStep, "Sonuç kontrol ediliyor...")
                 Log.d(TAG, "Adım $currentStep Doğrulandı: ${vResult.reason}")
             } else {
                 taskSession = taskSession.copy(currentState = AgentState.RECOVERING)
+                AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Alternatif yol aranıyor...")
                 Log.w(TAG, "Adım $currentStep Doğrulanamadı/Değişmedi: ${vResult.reason}")
 
                 val recoveryPlan = RecoveryStrategy.evaluateRecovery(
@@ -777,6 +874,7 @@ object DeviceAgentExecutor {
                             errorMessage = recoveryPlan.explanation,
                             isCancelled = true
                         )
+                        AgentLifecycleManager.failSession(taskSession.taskId, recoveryPlan.explanation)
                         Log.e(TAG, "Sonsuz döngü koruması tetiklendi: ${recoveryPlan.explanation}")
                         break
                     }
@@ -805,6 +903,12 @@ object DeviceAgentExecutor {
         }
 
         val isFinishedSuccessfully = isSuccess || (taskSession.currentState == AgentState.COMPLETED)
+        if (isFinishedSuccessfully) {
+            AgentLifecycleManager.completeSession(taskSession.taskId, finalSummary.ifBlank { "Görev başarıyla tamamlandı." })
+        } else if (taskSession.currentState != AgentState.FAILED && taskSession.currentState != AgentState.CANCELLED) {
+            AgentLifecycleManager.failSession(taskSession.taskId, taskSession.errorMessage ?: "Görev tamamlanamadı.")
+        }
+
         return@withContext AgentExecutionResult(
             isSuccess = isFinishedSuccessfully,
             actionType = if (isFinishedSuccessfully) "AUTONOMOUS_TASK_COMPLETE" else "AUTONOMOUS_LOOP_FINISHED",
@@ -826,12 +930,20 @@ object DeviceAgentExecutor {
 
         // 0. Screen reading command ("ekranı oku", "ekranda ne var", "ekranı incele")
         if (lower.contains("ekranı oku") || lower.contains("ekranda ne var") || lower.contains("ekranı incele") || lower.contains("ekrana bak") || lower.contains("ekranı tara")) {
+            val shortSession = AgentLifecycleManager.startSession(
+                taskGoal = command,
+                budget = TaskBudget(maxSteps = 1, overallTimeoutMs = 10_000L),
+                initialState = AgentState.OBSERVING
+            )
+            AgentLifecycleManager.transitionState(shortSession.taskId, AgentState.OBSERVING, 1, "Ekran metinleri okunuyor...")
             val service = AiDeviceAccessibilityService.instance
             if (service == null) {
+                val errMsg = "Ekranı okuyabilmek için Erişilebilirlik iznine ihtiyacım var."
+                AgentLifecycleManager.failSession(shortSession.taskId, errMsg)
                 return@withContext AgentExecutionResult(
                     isSuccess = false,
                     actionType = "SCREEN_READ_NO_SERVICE",
-                    speechFeedback = "Ekranı okuyabilmek için Erişilebilirlik iznine ihtiyacım var.",
+                    speechFeedback = errMsg,
                     technicalLog = "Accessibility service is null"
                 )
             }
@@ -844,6 +956,7 @@ object DeviceAgentExecutor {
             } else {
                 "Şu an $appName ekranındasınız. Tıklanabilir ${snapshot.clickableNodes.size} öğe mevcut."
             }
+            AgentLifecycleManager.completeSession(shortSession.taskId, feedback)
             return@withContext AgentExecutionResult(
                 isSuccess = true,
                 actionType = "READ_SCREEN_SUCCESS",
@@ -872,6 +985,13 @@ object DeviceAgentExecutor {
         // 2. Gesture / Navigation commands (Swipe, Home, Back, System & Audio)
         val navResult = performNavigation(lower)
         if (navResult.isSuccess) {
+            val navSession = AgentLifecycleManager.startSession(
+                taskGoal = command,
+                budget = TaskBudget(maxSteps = 1, overallTimeoutMs = 10_000L),
+                initialState = AgentState.ACTING
+            )
+            AgentLifecycleManager.transitionState(navSession.taskId, AgentState.ACTING, 1, navResult.speechFeedback)
+            AgentLifecycleManager.completeSession(navSession.taskId, navResult.speechFeedback)
             return@withContext navResult
         }
 
@@ -891,8 +1011,18 @@ object DeviceAgentExecutor {
 
         // 4. Explicit App Launch Command Fallback -> Pure Visual Human Open
         if (isAppLaunchIntent(lower)) {
+            val launchSession = AgentLifecycleManager.startSession(
+                taskGoal = command,
+                budget = TaskBudget(maxSteps = 6, overallTimeoutMs = 60_000L),
+                initialState = AgentState.PLANNING
+            )
+            AgentLifecycleManager.transitionState(launchSession.taskId, AgentState.PLANNING, 1, "Uygulama aranıyor...")
             val launchResult = openAppVisually(context, lower)
-            if (launchResult.isSuccess || launchResult.actionType == "APP_NOT_FOUND_VISUALLY") {
+            if (launchResult.isSuccess) {
+                AgentLifecycleManager.completeSession(launchSession.taskId, launchResult.speechFeedback)
+                return@withContext launchResult
+            } else {
+                AgentLifecycleManager.failSession(launchSession.taskId, launchResult.speechFeedback)
                 return@withContext launchResult
             }
         }
@@ -901,8 +1031,18 @@ object DeviceAgentExecutor {
         if (lower.contains("tıkla") || lower.contains("bas") || lower.contains("dokun") || lower.contains("seç")) {
             val targetQuery = lower.replace("tıkla", "").replace("bas", "").replace("dokun", "").replace("seç", "").trim()
             if (targetQuery.isNotEmpty()) {
+                val clickSession = AgentLifecycleManager.startSession(
+                    taskGoal = command,
+                    budget = TaskBudget(maxSteps = 2, overallTimeoutMs = 20_000L),
+                    initialState = AgentState.PLANNING
+                )
+                AgentLifecycleManager.transitionState(clickSession.taskId, AgentState.PLANNING, 1, "$targetQuery aranıyor...")
                 val clickResult = clickElementVisually(targetQuery)
                 if (clickResult.isSuccess) {
+                    AgentLifecycleManager.completeSession(clickSession.taskId, clickResult.speechFeedback)
+                    return@withContext clickResult
+                } else {
+                    AgentLifecycleManager.failSession(clickSession.taskId, clickResult.speechFeedback)
                     return@withContext clickResult
                 }
             }
