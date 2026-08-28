@@ -22,6 +22,10 @@ import com.example.ai.AIAgentScreenReasoner
 import com.example.ai.AgentActionType
 import com.example.ai.GroundingAction
 import com.example.ai.VisualGroundingEngine
+import com.example.agent.brain.AgentBrain
+import com.example.agent.brain.ActionProposal
+import com.example.agent.brain.AgentActionType as BrainActionType
+import com.example.data.security.CredentialStore
 import com.example.data.local.AssistantDatabase
 import com.example.data.model.MemoryCategory
 import com.example.data.model.MemoryEntryEntity
@@ -918,6 +922,295 @@ object DeviceAgentExecutor {
     }
 
     /**
+     * AgentBrain tabanlı otonom görev yürütücü.
+     * TaskSpec -> Dynamic Plan -> Observe -> Reason -> Safety Gate -> Physical Act -> Verification -> Memory -> RePlan
+     */
+    suspend fun executeAgentBrainAutonomousLoop(
+        context: Context,
+        goalPrompt: String,
+        maxSteps: Int = 10,
+        onStatusUpdate: ((String) -> Unit)? = null
+    ): AgentExecutionResult = withContext(Dispatchers.Main) {
+        val service = AiDeviceAccessibilityService.instance
+        if (service == null) {
+            val errMsg = "Otonom görevi yürütmek için Erişilebilirlik iznine ihtiyacım var."
+            return@withContext AgentExecutionResult(
+                isSuccess = false,
+                actionType = "ACCESSIBILITY_UNAVAILABLE",
+                speechFeedback = errMsg,
+                technicalLog = "AiDeviceAccessibilityService is null"
+            )
+        }
+
+        val credentialStore = CredentialStore(context)
+        val database = AssistantDatabase.getDatabase(context)
+        val profile = withContext(Dispatchers.IO) { database.userProfileDao().getUserProfileOnce() }
+
+        val groqKey = credentialStore.getApiKey("groq").ifBlank {
+            if (profile?.preferredAiProvider?.lowercase(Locale.ROOT) == "groq") profile?.customApiKey ?: "" else ""
+        }
+
+        if (groqKey.isBlank()) {
+            val noKeyMsg = "API Anahtarı bulunamadı. Lütfen Ayarlar'dan Groq API Key tanımlayın."
+            AgentLifecycleManager.failSession("session_nokey", noKeyMsg)
+            return@withContext AgentExecutionResult(
+                isSuccess = false,
+                actionType = "MISSING_API_KEY",
+                speechFeedback = noKeyMsg,
+                technicalLog = "No valid Groq API key in CredentialStore or UserProfile"
+            )
+        }
+
+        val selectedModel = credentialStore.getSelectedModel("groq", "openai/gpt-oss-120b")
+
+        val budget = TaskBudget(
+            maxSteps = maxSteps,
+            maxRetriesPerStep = 3,
+            overallTimeoutMs = 180_000L,
+            perStepTimeoutMs = 25_000L,
+            maxConsecutiveFailures = 3
+        )
+
+        var taskSession = AgentLifecycleManager.startSession(
+            taskGoal = goalPrompt,
+            budget = budget,
+            initialState = AgentState.PLANNING
+        )
+
+        val brain = AgentBrain()
+        val intentType = IntentRouter.classifyIntent(goalPrompt).intent
+
+        onStatusUpdate?.invoke("Ekran inceleniyor ve plan oluşturuluyor...")
+        val initialSnapshot = service.extractLiveScreenSnapshot()
+        val plan = brain.initializeTask(
+            userPrompt = goalPrompt,
+            snapshot = initialSnapshot,
+            apiKey = groqKey,
+            intentType = intentType,
+            model = selectedModel
+        )
+
+        val planDesc = plan.currentSubGoal?.description ?: "Görev başlatıldı."
+        AgentLifecycleManager.transitionState(
+            taskSession.taskId,
+            AgentState.PLANNING,
+            1,
+            "Plan: $planDesc"
+        )
+        onStatusUpdate?.invoke("Plan: $planDesc")
+
+        var currentStep = 1
+        var finalSummary = ""
+        var isSuccess = false
+
+        while (!taskSession.isFinished && currentStep <= budget.maxSteps) {
+            val currentSess = AgentLifecycleManager.currentSession.value
+            if (currentSess == null || currentSess.taskId != taskSession.taskId || currentSess.isCancelled) {
+                Log.w(TAG, "Otonom görev kullanıcı veya sistem tarafından iptal edildi.")
+                taskSession = taskSession.copy(currentState = AgentState.CANCELLED, isCancelled = true)
+                break
+            }
+
+            if (taskSession.isTimedOut()) {
+                val timeoutMsg = "Görev zaman aşımına ulaştı (${budget.overallTimeoutMs / 1000} sn)."
+                AgentLifecycleManager.failSession(taskSession.taskId, timeoutMsg)
+                finalSummary = timeoutMsg
+                break
+            }
+
+            // 1. OBSERVE
+            taskSession = taskSession.copy(currentState = AgentState.OBSERVING, currentStep = currentStep)
+            AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, currentStep, "Ekran inceleniyor...")
+
+            val beforeSnapshot = service.updateLiveSnapshot()
+            val screenFingerprint = com.example.agent.core.ScreenFingerprintGenerator.generateFingerprint(beforeSnapshot).value
+
+            // 2. REASON & PROPOSE
+            taskSession = taskSession.copy(currentState = AgentState.PLANNING)
+            AgentLifecycleManager.transitionState(
+                taskSession.taskId,
+                AgentState.PLANNING,
+                currentStep,
+                "Karar veriliyor..."
+            )
+            onStatusUpdate?.invoke("Adım $currentStep: Karar veriliyor...")
+
+            val proposal = brain.proposeNextAction(
+                snapshot = beforeSnapshot,
+                screenFingerprint = screenFingerprint,
+                apiKey = groqKey,
+                model = selectedModel
+            )
+
+            Log.i(TAG, "Brain Proposal: type=${proposal.actionType}, target=${proposal.target}, reason=${proposal.reason}")
+
+            if (proposal.actionType == BrainActionType.COMPLETE) {
+                val isVerified = brain.verifyTaskCompletion(beforeSnapshot)
+                if (isVerified) {
+                    isSuccess = true
+                    finalSummary = proposal.reason.ifBlank { "Görev başarıyla tamamlandı." }
+                    AgentLifecycleManager.completeSession(taskSession.taskId, finalSummary)
+                    break
+                } else {
+                    Log.w(TAG, "Task COMPLETE teklifi ekran doğrulamasından geçemedi. RePlan yapılıyor.")
+                    brain.workingMemory.recordFailure(currentStep, "COMPLETE", "Ekran tamamlanma kriterini doğrulamıyor.")
+                    brain.replan(beforeSnapshot, groqKey, selectedModel)
+                    currentStep++
+                    continue
+                }
+            }
+
+            if (proposal.actionType == BrainActionType.REPLAN) {
+                onStatusUpdate?.invoke("Yeniden planlanıyor...")
+                AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Yeniden planlanıyor...")
+                brain.replan(beforeSnapshot, groqKey, selectedModel)
+                currentStep++
+                continue
+            }
+
+            if (proposal.actionType == BrainActionType.NO_ACTION) {
+                val noActMsg = proposal.reason.ifBlank { "Güvenli eylem bulunamadı." }
+                AgentLifecycleManager.failSession(taskSession.taskId, noActMsg)
+                finalSummary = noActMsg
+                break
+            }
+
+            // 3. SAFETY GUARDIAN GATE
+            val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in beforeSnapshot.clickableNodes.indices) {
+                beforeSnapshot.clickableNodes[proposal.targetIndex]
+            } else {
+                beforeSnapshot.clickableNodes.firstOrNull { node ->
+                    val txt = node.text.ifBlank { node.contentDescription }
+                    proposal.target != null && txt.contains(proposal.target, ignoreCase = true)
+                }
+            }
+
+            val safetyDecision = brain.validateActionSafety(
+                proposal = proposal,
+                snapshot = beforeSnapshot,
+                node = targetNode
+            )
+
+            if (!safetyDecision.allowed) {
+                val blockedMsg = "Güvenlik Engeli: ${safetyDecision.reason}"
+                Log.w(TAG, "SafetyGuardian eylemi engelledi: $blockedMsg")
+                AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, blockedMsg)
+                onStatusUpdate?.invoke(blockedMsg)
+
+                brain.workingMemory.recordFailure(currentStep, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
+                brain.replan(beforeSnapshot, groqKey, selectedModel)
+                currentStep++
+                continue
+            }
+
+            // 4. PHYSICAL EXECUTION
+            val prePhysicalSession = AgentLifecycleManager.currentSession.value
+            if (prePhysicalSession == null || prePhysicalSession.taskId != taskSession.taskId || prePhysicalSession.isCancelled) {
+                Log.w(TAG, "Fiziksel eylem öncesi görev iptal edildi. Aksiyon durduruldu.")
+                taskSession = taskSession.copy(currentState = AgentState.CANCELLED, isCancelled = true)
+                break
+            }
+
+            taskSession = taskSession.copy(currentState = AgentState.ACTING)
+            val actDesc = proposal.reason.ifBlank { "Eylem uygulanıyor: ${proposal.actionType}" }
+            AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, currentStep, actDesc)
+            onStatusUpdate?.invoke("Adım $currentStep: $actDesc")
+
+            executePhysicalActionProposal(service, context, proposal, targetNode, beforeSnapshot)
+            service.awaitScreenSettled(800L, 200L)
+
+            // 5. VERIFY OUTCOME & RECORD MEMORY
+            taskSession = taskSession.copy(currentState = AgentState.VERIFYING)
+            AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.VERIFYING, currentStep, "Doğrulanıyor...")
+
+            val afterSnapshot = service.updateLiveSnapshot()
+            val verification = brain.verifyAndRecordResult(proposal, beforeSnapshot, afterSnapshot)
+
+            Log.i(TAG, "Verification: isVerified=${verification.isVerified}, reason=${verification.reason}")
+
+            if (!verification.isVerified && brain.workingMemory.state.consecutiveFailures >= 3) {
+                Log.w(TAG, "3 üst üste başarısız eylem. REPLAN tetikleniyor.")
+                brain.replan(afterSnapshot, groqKey, selectedModel)
+            }
+
+            currentStep++
+        }
+
+        val finalIsSuccess = isSuccess || (taskSession.currentState == AgentState.COMPLETED)
+        if (finalIsSuccess) {
+            AgentExecutionResult(
+                isSuccess = true,
+                actionType = "AGENT_BRAIN_SUCCESS",
+                speechFeedback = finalSummary.ifBlank { "Görev başarıyla tamamlandı." },
+                technicalLog = "AgentBrain completed task successfully in ${currentStep - 1} steps."
+            )
+        } else {
+            if (taskSession.currentState != AgentState.FAILED && taskSession.currentState != AgentState.CANCELLED) {
+                AgentLifecycleManager.failSession(taskSession.taskId, finalSummary.ifBlank { "Görev tamamlanamadı." })
+            }
+            AgentExecutionResult(
+                isSuccess = false,
+                actionType = "AGENT_BRAIN_FAILED",
+                speechFeedback = finalSummary.ifBlank { "Görev AgentBrain tarafından tamamlanamadı." },
+                technicalLog = "AgentBrain loop finished without completion verification."
+            )
+        }
+    }
+
+    private suspend fun executePhysicalActionProposal(
+        service: AiDeviceAccessibilityService,
+        context: Context,
+        proposal: ActionProposal,
+        targetNode: ScreenNodeData?,
+        snapshot: ScreenSnapshot
+    ) {
+        when (proposal.actionType) {
+            BrainActionType.CLICK_NODE -> {
+                if (targetNode != null) {
+                    val cx = targetNode.bounds.centerX().toFloat()
+                    val cy = targetNode.bounds.centerY().toFloat()
+                    service.clickAtWithVerificationResult(cx, cy, label = proposal.target ?: "düğme", targetNode = targetNode)
+                } else if (proposal.target != null) {
+                    val matched = snapshot.clickableNodes.firstOrNull {
+                        it.text.contains(proposal.target, ignoreCase = true) || it.contentDescription.contains(proposal.target, ignoreCase = true)
+                    }
+                    if (matched != null) {
+                        service.clickAtWithVerificationResult(
+                            matched.bounds.centerX().toFloat(),
+                            matched.bounds.centerY().toFloat(),
+                            label = proposal.target,
+                            targetNode = matched
+                        )
+                    }
+                }
+            }
+            BrainActionType.TYPE_TEXT -> {
+                if (!proposal.textPayload.isNullOrBlank()) {
+                    service.typeTextIntoNode(proposal.textPayload)
+                }
+            }
+            BrainActionType.PRESS_BACK -> {
+                service.goBack()
+            }
+            BrainActionType.PRESS_HOME -> {
+                service.goHome()
+            }
+            BrainActionType.SWIPE -> {
+                service.swipeDownAsync()
+            }
+            BrainActionType.OPEN_APP -> {
+                val appName = proposal.target ?: proposal.textPayload ?: ""
+                if (appName.isNotBlank()) {
+                    openAppVisually(context, appName)
+                }
+            }
+            else -> {
+                service.awaitScreenSettled(500L)
+            }
+        }
+    }
+
+    /**
      * Executes multi-step intelligent user commands with visual grounding and human gestures.
      */
     suspend fun executeSmartAutonomousTask(
@@ -965,24 +1258,7 @@ object DeviceAgentExecutor {
             )
         }
 
-        // 1. WhatsApp Automation Pattern (e.g. "whatsapp'tan ahmet'e selam yaz", "wp'den mehmet'e merhaba de")
-        if (lower.contains("whatsapp") || lower.contains("wp")) {
-            val isMessageCommand = lower.contains("mesaj") || lower.contains("yaz") || lower.contains("gönder") || lower.contains("at") || lower.contains("söyle") || lower.contains("de")
-            if (isMessageCommand) {
-                val regexPattern = Regex("(?:whatsapp|wp)(?:'tan|'ten|tan|ten)?\\s+([a-zA-ZçğıöşüÇĞİÖŞÜ0-9]+)(?:'e|'a|'ye|'ya|e|a)?\\s+(.+?)(?:\\s+yaz|\\s+gönder|\\s+at|\\s+mesajı\\s+at)?$")
-                val match = regexPattern.find(lower)
-                if (match != null && match.groupValues.size >= 3) {
-                    val contact = match.groupValues[1].trim()
-                    var msg = match.groupValues[2].trim()
-                    msg = msg.replace(Regex("(yaz|gönder|at|de|söyle)$"), "").trim()
-                    if (contact.isNotEmpty() && msg.isNotEmpty()) {
-                        return@withContext executeWhatsAppMessageWorkflow(context, contact, msg)
-                    }
-                }
-            }
-        }
-
-        // 2. Gesture / Navigation commands (Swipe, Home, Back, System & Audio)
+        // 1. Gesture / Navigation commands (Swipe, Home, Back, System & Audio)
         val navResult = performNavigation(lower)
         if (navResult.isSuccess) {
             val navSession = AgentLifecycleManager.startSession(
@@ -995,66 +1271,19 @@ object DeviceAgentExecutor {
             return@withContext navResult
         }
 
-        // 3. Multi-Step ReAct Loop with AI Model Reasoner (for apps in folders, multi-step tasks, navigation)
-        if (reasoner != null) {
-            val loopResult = executeAutonomousReActLoop(
-                context = context,
-                goalPrompt = command,
-                reasoner = reasoner,
-                maxSteps = 8,
-                onStatusUpdate = onStatusUpdate
-            )
-            if (loopResult.isSuccess) {
-                return@withContext loopResult
-            }
-        }
-
-        // 4. Explicit App Launch Command Fallback -> Pure Visual Human Open
-        if (isAppLaunchIntent(lower)) {
-            val launchSession = AgentLifecycleManager.startSession(
-                taskGoal = command,
-                budget = TaskBudget(maxSteps = 6, overallTimeoutMs = 60_000L),
-                initialState = AgentState.PLANNING
-            )
-            AgentLifecycleManager.transitionState(launchSession.taskId, AgentState.PLANNING, 1, "Uygulama aranıyor...")
-            val launchResult = openAppVisually(context, lower)
-            if (launchResult.isSuccess) {
-                AgentLifecycleManager.completeSession(launchSession.taskId, launchResult.speechFeedback)
-                return@withContext launchResult
-            } else {
-                AgentLifecycleManager.failSession(launchSession.taskId, launchResult.speechFeedback)
-                return@withContext launchResult
-            }
-        }
-
-        // 5. On-screen element visual click fallback
-        if (lower.contains("tıkla") || lower.contains("bas") || lower.contains("dokun") || lower.contains("seç")) {
-            val targetQuery = lower.replace("tıkla", "").replace("bas", "").replace("dokun", "").replace("seç", "").trim()
-            if (targetQuery.isNotEmpty()) {
-                val clickSession = AgentLifecycleManager.startSession(
-                    taskGoal = command,
-                    budget = TaskBudget(maxSteps = 2, overallTimeoutMs = 20_000L),
-                    initialState = AgentState.PLANNING
-                )
-                AgentLifecycleManager.transitionState(clickSession.taskId, AgentState.PLANNING, 1, "$targetQuery aranıyor...")
-                val clickResult = clickElementVisually(targetQuery)
-                if (clickResult.isSuccess) {
-                    AgentLifecycleManager.completeSession(clickSession.taskId, clickResult.speechFeedback)
-                    return@withContext clickResult
-                } else {
-                    AgentLifecycleManager.failSession(clickSession.taskId, clickResult.speechFeedback)
-                    return@withContext clickResult
-                }
-            }
-        }
-
-        // 6. Not a recognized device automation command -> Delegate to AI Conversational & Reasoning Core!
-        return@withContext AgentExecutionResult(
-            isSuccess = false,
-            actionType = "DELEGATE_TO_AI_MODEL",
-            speechFeedback = "",
-            technicalLog = "Passed to conversational AI model"
+        // 2. PRIMARY: Execute via AgentBrain Orchestrator
+        val brainResult = executeAgentBrainAutonomousLoop(
+            context = context,
+            goalPrompt = command,
+            maxSteps = 10,
+            onStatusUpdate = onStatusUpdate
         )
+
+        if (brainResult.isSuccess) {
+            return@withContext brainResult
+        }
+
+        return@withContext brainResult
     }
 
     /**

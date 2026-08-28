@@ -222,11 +222,29 @@ class AiDeviceAccessibilityService : AccessibilityService() {
 
     // ----------------- Virtual Human-Like Finger Gestures & Touch Dispatch -----------------
 
+    private fun checkPhysicalSafety(actionType: String, targetText: String? = null, node: ScreenNodeData? = null): Boolean {
+        val snapshot = inspectCurrentScreen()
+        val decision = com.example.agent.brain.SafetyGuardian.evaluateAction(
+            actionType = actionType,
+            targetText = targetText,
+            node = node,
+            snapshot = snapshot
+        )
+        if (!decision.allowed) {
+            Log.e("AiAccessibility", "PHYSICAL ACTION BLOCKED BY CENTRAL SAFETY GUARDIAN: action=$actionType, text=$targetText, reason=${decision.reason}")
+            return false
+        }
+        return true
+    }
+
     /**
      * Finds the actual AccessibilityNodeInfo matching the ScreenNodeData and executes ACTION_CLICK directly on it or its clickable parent.
      * Returns true if native ACTION_CLICK was performed and returned true.
      */
     fun performNativeNodeClick(nodeData: ScreenNodeData): Boolean {
+        if (!checkPhysicalSafety("CLICK_NODE", targetText = nodeData.text, node = nodeData)) {
+            return false
+        }
         val root = rootInActiveWindow ?: return false
         var targetNode: AccessibilityNodeInfo? = null
 
@@ -300,6 +318,10 @@ class AiDeviceAccessibilityService : AccessibilityService() {
      * Dispatches physical touch with real physical pixel bounds, clipping, and screen boundary validation.
      */
     fun clickAt(x: Float, y: Float, label: String = "", onComplete: (() -> Unit)? = null) {
+        if (!checkPhysicalSafety("CLICK_COORD", targetText = label)) {
+            onComplete?.invoke()
+            return
+        }
         val dm = resources.displayMetrics
         val screenWidth = dm.widthPixels.toFloat()
         val screenHeight = dm.heightPixels.toFloat()
@@ -457,6 +479,10 @@ class AiDeviceAccessibilityService : AccessibilityService() {
     ): Boolean = clickAtWithVerificationResult(x, y, label, targetNode, maxRetries).isSuccess
 
     fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300, onComplete: (() -> Unit)? = null) {
+        if (!checkPhysicalSafety("SWIPE", targetText = "Swipe")) {
+            onComplete?.invoke()
+            return
+        }
         _virtualFingerState.value = VirtualFingerState(startX, startY, "KAYDIRMA", "Ekran Kaydırma")
 
         val path = Path().apply {
@@ -539,6 +565,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
     }
 
     fun typeTextIntoNode(text: String, targetQuery: String = ""): Boolean {
+        if (!checkPhysicalSafety("TYPE_TEXT", targetText = text)) {
+            return false
+        }
         val root = rootInActiveWindow ?: return false
         var targetNode: AccessibilityNodeInfo? = null
 
@@ -603,14 +632,26 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         return false
     }
 
-    fun pressHome() = performGlobalAction(GLOBAL_ACTION_HOME)
-    fun pressBack() = performGlobalAction(GLOBAL_ACTION_BACK)
+    fun pressHome(): Boolean {
+        if (!checkPhysicalSafety("PRESS_HOME", targetText = "Home")) return false
+        return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+    fun pressBack(): Boolean {
+        if (!checkPhysicalSafety("PRESS_BACK", targetText = "Back")) return false
+        return performGlobalAction(GLOBAL_ACTION_BACK)
+    }
     fun pressRecents() = performGlobalAction(GLOBAL_ACTION_RECENTS)
     fun pressNotifications() = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
     fun openNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
     fun openQuickSettings(): Boolean = performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
-    fun goHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
-    fun goBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
+    fun goHome(): Boolean {
+        if (!checkPhysicalSafety("PRESS_HOME", targetText = "Home")) return false
+        return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+    fun goBack(): Boolean {
+        if (!checkPhysicalSafety("PRESS_BACK", targetText = "Back")) return false
+        return performGlobalAction(GLOBAL_ACTION_BACK)
+    }
 
     fun volumeUp(): Boolean {
         return try {
@@ -651,6 +692,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         maxSwipes: Int = 6,
         onStatusUpdate: ((String) -> Unit)? = null
     ): Boolean = withContext(Dispatchers.Main) {
+        if (!checkPhysicalSafety("OPEN_APP", targetText = appName)) {
+            return@withContext false
+        }
         onStatusUpdate?.invoke("Ana ekranda $appName simgesi görsel olarak aranıyor...")
         pressHome()
         delay(800)

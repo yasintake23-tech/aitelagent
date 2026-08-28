@@ -3,6 +3,8 @@ package com.example.agent.core
 import android.content.Context
 import android.graphics.PointF
 import android.util.Log
+import com.example.agent.brain.AgentBrain
+import com.example.agent.brain.AgentActionType as BrainActionType
 import com.example.ai.AIAgentScreenReasoner
 import com.example.ai.AgentActionType
 import com.example.data.local.AssistantDatabase
@@ -10,6 +12,7 @@ import com.example.data.local.MemoryFileManager
 import com.example.data.model.MemoryCategory
 import com.example.data.model.MemoryEntryEntity
 import com.example.data.model.UserProfileEntity
+import com.example.data.security.CredentialStore
 import com.example.service.AiDeviceAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -70,6 +73,23 @@ object StructuredExplorationEngine {
 
         val database = AssistantDatabase.getDatabase(context)
         val displayMetrics = context.resources.displayMetrics
+        val credentialStore = CredentialStore(context)
+        val dbProfile = withContext(Dispatchers.IO) { database.userProfileDao().getUserProfileOnce() }
+
+        val groqKey = credentialStore.getApiKey("groq").ifBlank {
+            if (dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) == "groq") dbProfile?.customApiKey ?: "" else ""
+        }
+        val selectedModel = credentialStore.getSelectedModel("groq", "openai/gpt-oss-120b")
+
+        val brain = AgentBrain()
+        val initialSnapshot = service.extractLiveScreenSnapshot()
+        brain.initializeTask(
+            userPrompt = taskPrompt,
+            snapshot = initialSnapshot,
+            apiKey = groqKey,
+            intentType = UserIntent.EXPLORATION_TASK,
+            model = selectedModel
+        )
 
         // 1. Ekran donanım bilgisini ilk hafıza kaydı olarak kaydet
         withContext(Dispatchers.IO) {
@@ -125,35 +145,65 @@ object StructuredExplorationEngine {
                 }
                 session.currentScreenFingerprint = currentFingerprint
 
-                // 3. DECIDE NEXT MEANINGFUL ACTION (Karar Alma - Rastgele hareket YOK)
+                // 3. DECIDE NEXT MEANINGFUL ACTION WITH AGENT BRAIN
                 session.currentState = AgentState.PLANNING
                 AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.PLANNING, session.stepCount, "Planlanıyor...")
-                val existingMemories = withContext(Dispatchers.IO) {
-                    database.memoryDao().getAllMemoriesOnce()
-                }
 
-                val decision = ExplorationDecisionMaker.decideNextExplorationAction(
+                val proposal = brain.proposeNextAction(
                     snapshot = snapshot,
-                    session = session,
-                    reasoner = reasoner,
-                    memories = existingMemories,
-                    profile = profile
+                    screenFingerprint = currentFingerprint.value,
+                    apiKey = groqKey,
+                    model = selectedModel
                 )
 
-                onStatusUpdate(decision.speechStatus.ifBlank { "Ekran inceleniyor..." })
-                Log.d(TAG, "Adım ${session.stepCount} Kararı: ${decision.actionType}, Açıklama: ${decision.thought}")
+                onStatusUpdate(proposal.reason.ifBlank { "Ekran inceleniyor..." })
+                Log.d(TAG, "Adım ${session.stepCount} Kararı: ${proposal.actionType}, Açıklama: ${proposal.reason}")
 
                 // Görev tamamlama kararı geldiyse
-                if (decision.actionType == AgentActionType.TASK_COMPLETE) {
+                if (proposal.actionType == BrainActionType.COMPLETE || proposal.actionType == BrainActionType.NO_ACTION) {
                     session.currentState = AgentState.COMPLETED
-                    AgentLifecycleManager.completeSession(centralSession.taskId, decision.completionSummary.ifBlank { "Keşif başarıyla tamamlandı." })
-                    onStatusUpdate(decision.completionSummary.ifBlank { "Keşif başarıyla tamamlandı." })
+                    AgentLifecycleManager.completeSession(centralSession.taskId, proposal.reason.ifBlank { "Keşif başarıyla tamamlandı." })
+                    onStatusUpdate(proposal.reason.ifBlank { "Keşif başarıyla tamamlandı." })
                     break
                 }
 
-                // 4. ACT (Eylemi Güvenle Yürüt)
+                if (proposal.actionType == BrainActionType.REPLAN) {
+                    onStatusUpdate("Yeniden planlanıyor...")
+                    AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.RECOVERING, session.stepCount, "Yeniden planlanıyor...")
+                    brain.replan(snapshot, groqKey, selectedModel)
+                    continue
+                }
+
+                // 4. SAFETY GUARDIAN GATE
+                val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
+                    snapshot.clickableNodes[proposal.targetIndex]
+                } else {
+                    snapshot.clickableNodes.firstOrNull { node ->
+                        val txt = node.text.ifBlank { node.contentDescription }
+                        proposal.target != null && txt.contains(proposal.target, ignoreCase = true)
+                    }
+                }
+
+                val safetyDecision = brain.validateActionSafety(
+                    proposal = proposal,
+                    snapshot = snapshot,
+                    node = targetNode
+                )
+
+                if (!safetyDecision.allowed) {
+                    val blockedMsg = "Güvenlik Engeli: ${safetyDecision.reason}"
+                    Log.w(TAG, "SafetyGuardian eylemi engelledi: $blockedMsg")
+                    AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.RECOVERING, session.stepCount, blockedMsg)
+                    onStatusUpdate(blockedMsg)
+
+                    brain.workingMemory.recordFailure(session.stepCount, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
+                    brain.replan(snapshot, groqKey, selectedModel)
+                    continue
+                }
+
+                // 5. ACT (Eylemi Güvenle Yürüt)
                 session.currentState = AgentState.ACTING
-                val actingStatus = decision.thought.ifBlank { "Eylem gerçekleştiriliyor..." }
+                val actingStatus = proposal.reason.ifBlank { "Eylem gerçekleştiriliyor..." }
                 val transitionOk = AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.ACTING, session.stepCount, actingStatus)
                 val preActSession = AgentLifecycleManager.currentSession.value
 
@@ -163,56 +213,68 @@ object StructuredExplorationEngine {
                     break
                 }
 
-                val targetNode = if (decision.targetIndex in snapshot.clickableNodes.indices) {
-                    snapshot.clickableNodes[decision.targetIndex]
+                val coords = if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
+                    val n = snapshot.clickableNodes[proposal.targetIndex]
+                    PointF(n.bounds.centerX().toFloat(), n.bounds.centerY().toFloat())
+                } else if (proposal.target != null) {
+                    val n = snapshot.clickableNodes.firstOrNull {
+                        it.text.contains(proposal.target, ignoreCase = true) || it.contentDescription.contains(proposal.target, ignoreCase = true)
+                    }
+                    n?.let { PointF(it.bounds.centerX().toFloat(), it.bounds.centerY().toFloat()) }
                 } else null
 
-                when (decision.actionType) {
-                    AgentActionType.CLICK_COORD, AgentActionType.CLICK_NODE -> {
-                        val coords = decision.coordinates ?: targetNode?.let {
+                when (proposal.actionType) {
+                    BrainActionType.CLICK_COORD, BrainActionType.CLICK_NODE -> {
+                        val finalCoords = coords ?: targetNode?.let {
                             PointF(it.bounds.centerX().toFloat(), it.bounds.centerY().toFloat())
                         }
-                        if (coords != null) {
-                            service.clickAtWithVerification(coords.x, coords.y, decision.targetText, targetNode = targetNode)
+                        if (finalCoords != null) {
+                            service.clickAtWithVerification(finalCoords.x, finalCoords.y, proposal.target ?: "düğme", targetNode = targetNode)
                         } else {
                             service.awaitScreenSettled(800L)
                         }
                     }
-                    AgentActionType.SWIPE_DOWN -> {
+                    BrainActionType.TYPE_TEXT -> {
+                        if (!proposal.textPayload.isNullOrBlank()) {
+                            service.typeTextIntoNode(proposal.textPayload)
+                        }
+                    }
+                    BrainActionType.SWIPE, BrainActionType.SWIPE_DOWN -> {
                         service.swipeDownAsync()
                     }
-                    AgentActionType.SWIPE_UP -> {
+                    BrainActionType.SWIPE_UP -> {
                         service.swipeUpAsync()
                     }
-                    AgentActionType.SWIPE_LEFT -> {
+                    BrainActionType.SWIPE_LEFT -> {
                         service.swipeLeftAsync()
                     }
-                    AgentActionType.SWIPE_RIGHT -> {
+                    BrainActionType.SWIPE_RIGHT -> {
                         service.swipeRightAsync()
                     }
-                    AgentActionType.PRESS_BACK -> {
+                    BrainActionType.PRESS_BACK -> {
                         service.goBack()
                     }
-                    AgentActionType.PRESS_HOME -> {
+                    BrainActionType.PRESS_HOME -> {
                         service.goHome()
                     }
-                    AgentActionType.OPEN_APP -> {
-                        if (decision.appName.isNotBlank()) {
-                            service.findAndOpenAppVisually(decision.appName, profile?.customApiKey ?: "", 4) { msg ->
+                    BrainActionType.OPEN_APP -> {
+                        val appName = proposal.target ?: proposal.textPayload ?: ""
+                        if (appName.isNotBlank()) {
+                            service.findAndOpenAppVisually(appName, profile?.customApiKey ?: "", 4) { msg ->
                                 onStatusUpdate(msg)
                             }
                         }
                     }
-                    AgentActionType.OPEN_QUICK_SETTINGS -> {
+                    BrainActionType.OPEN_QUICK_SETTINGS -> {
                         service.openQuickSettings()
                     }
-                    AgentActionType.OPEN_NOTIFICATIONS -> {
+                    BrainActionType.OPEN_NOTIFICATIONS -> {
                         service.openNotifications()
                     }
-                    AgentActionType.VOLUME_UP -> {
+                    BrainActionType.VOLUME_UP -> {
                         service.volumeUp()
                     }
-                    AgentActionType.VOLUME_DOWN -> {
+                    BrainActionType.VOLUME_DOWN -> {
                         service.volumeDown()
                     }
                     else -> {
@@ -220,7 +282,7 @@ object StructuredExplorationEngine {
                     }
                 }
 
-                // 5. VERIFY & COMPARE (Eylem Sonrası Doğrulama)
+                // 6. VERIFY & COMPARE (Eylem Sonrası Doğrulama)
                 session.currentState = AgentState.VERIFYING
                 AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.VERIFYING, session.stepCount, "Sonuç kontrol ediliyor...")
                 service.awaitScreenSettled(1200L, 200L)
@@ -229,9 +291,8 @@ object StructuredExplorationEngine {
                 val afterFingerprint = ScreenFingerprintGenerator.generateFingerprint(afterSnapshot)
                 val diffType = ScreenFingerprintGenerator.compareFingerprints(currentFingerprint, afterFingerprint)
 
-                val isActionResultEffective = (diffType != ScreenDifferenceType.SAME_STATE) ||
-                        (decision.actionType == AgentActionType.SWIPE_DOWN) ||
-                        (decision.actionType == AgentActionType.PRESS_BACK)
+                val verification = brain.verifyAndRecordResult(proposal, snapshot, afterSnapshot)
+                val isActionResultEffective = verification.isVerified
 
                 if (isActionResultEffective) {
                     session.consecutiveFailures = 0
@@ -239,26 +300,41 @@ object StructuredExplorationEngine {
                     session.consecutiveFailures++
                 }
 
-                // 6. RECORD ACTION OUTCOME & PROGRESS
+                // 7. RECORD ACTION OUTCOME & PROGRESS
                 session.recordActionOutcome(
                     stepNumber = session.stepCount,
                     fromFingerprint = currentFingerprint.value,
-                    actionType = decision.actionType,
-                    targetDescription = decision.targetText.ifBlank { decision.appName.ifBlank { decision.actionType.name } },
-                    thought = decision.thought,
+                    actionType = when (proposal.actionType) {
+                        BrainActionType.CLICK_COORD -> AgentActionType.CLICK_COORD
+                        BrainActionType.CLICK_NODE -> AgentActionType.CLICK_NODE
+                        BrainActionType.SWIPE_DOWN -> AgentActionType.SWIPE_DOWN
+                        BrainActionType.SWIPE_UP -> AgentActionType.SWIPE_UP
+                        BrainActionType.SWIPE_LEFT -> AgentActionType.SWIPE_LEFT
+                        BrainActionType.SWIPE_RIGHT -> AgentActionType.SWIPE_RIGHT
+                        BrainActionType.PRESS_BACK -> AgentActionType.PRESS_BACK
+                        BrainActionType.PRESS_HOME -> AgentActionType.PRESS_HOME
+                        BrainActionType.OPEN_APP -> AgentActionType.OPEN_APP
+                        BrainActionType.OPEN_QUICK_SETTINGS -> AgentActionType.OPEN_QUICK_SETTINGS
+                        BrainActionType.OPEN_NOTIFICATIONS -> AgentActionType.OPEN_NOTIFICATIONS
+                        BrainActionType.VOLUME_UP -> AgentActionType.VOLUME_UP
+                        BrainActionType.VOLUME_DOWN -> AgentActionType.VOLUME_DOWN
+                        else -> AgentActionType.IDLE
+                    },
+                    targetDescription = proposal.target?.ifBlank { proposal.textPayload?.ifBlank { proposal.actionType } } ?: proposal.actionType,
+                    thought = proposal.reason,
                     toFingerprint = afterFingerprint.value,
                     diffType = diffType,
                     isSuccess = isActionResultEffective
                 )
 
-                // 7. MEMORY LEARNING (Yeni keşfedilen bilgi varsa kaydet)
-                if (!decision.memoryKey.isNullOrBlank() && !decision.memoryValue.isNullOrBlank()) {
+                // 8. MEMORY LEARNING (Yeni keşfedilen bilgi varsa kaydet)
+                if (!proposal.memoryKey.isNullOrBlank() && !proposal.memoryValue.isNullOrBlank()) {
                     withContext(Dispatchers.IO) {
                         database.memoryDao().insertMemory(
                             MemoryEntryEntity(
                                 category = MemoryCategory.PREFERENCE.name,
-                                key = decision.memoryKey,
-                                value = decision.memoryValue,
+                                key = proposal.memoryKey,
+                                value = proposal.memoryValue,
                                 importance = 1,
                                 timestamp = System.currentTimeMillis()
                             )
