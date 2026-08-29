@@ -112,6 +112,27 @@ class AIProviderManager(
         return getProvider(providerId).availableModels
     }
 
+    suspend fun generateStructuralContent(
+        providerId: String,
+        systemPrompt: String,
+        userPrompt: String,
+        onError: ((String) -> Unit)? = null
+    ): String {
+        val provider = getProvider(providerId)
+        val apiKey = credentialStore.getApiKey(provider.id)
+        if (apiKey.isBlank()) {
+            onError?.invoke("API_KEY_MISSING")
+            throw IllegalArgumentException("API_KEY_MISSING")
+        }
+        val model = getSelectedModel(provider.id)
+        return try {
+            provider.generateStructuralContent(systemPrompt, userPrompt, apiKey, model)
+        } catch (e: Exception) {
+            onError?.invoke("Exception: ${e.message}")
+            throw e
+        }
+    }
+
     private suspend fun detectAndSaveMemory(prompt: String) {
         val lower = prompt.lowercase(Locale("tr", "TR")).trim()
         val explicitMemoryTriggers = listOf(

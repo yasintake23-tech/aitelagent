@@ -946,22 +946,29 @@ object DeviceAgentExecutor {
         val database = AssistantDatabase.getDatabase(context)
         val profile = withContext(Dispatchers.IO) { database.userProfileDao().getUserProfileOnce() }
 
-        val groqKey = credentialStore.getApiKey("groq").ifBlank {
-            if (profile?.preferredAiProvider?.lowercase(Locale.ROOT) == "groq") profile?.customApiKey ?: "" else ""
+        val aiProviderManager = com.example.ai.AIProviderManager(
+            com.example.data.repository.MemoryRepository(database.userProfileDao(), database.memoryDao()),
+            credentialStore
+        )
+
+        val activeProviderId = profile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini"
+        val activeProvider = aiProviderManager.getProvider(activeProviderId)
+        val apiKey = aiProviderManager.getApiKey(activeProviderId).ifBlank {
+            profile?.customApiKey ?: ""
         }
 
-        if (groqKey.isBlank()) {
-            val noKeyMsg = "API Anahtarı bulunamadı. Lütfen Ayarlar'dan Groq API Key tanımlayın."
+        if (apiKey.isBlank()) {
+            val noKeyMsg = "API Anahtarı bulunamadı. Lütfen Ayarlar'dan ${activeProvider.displayName} API Key tanımlayın."
             AgentLifecycleManager.failSession("session_nokey", noKeyMsg)
             return@withContext AgentExecutionResult(
                 isSuccess = false,
                 actionType = "MISSING_API_KEY",
                 speechFeedback = noKeyMsg,
-                technicalLog = "No valid Groq API key in CredentialStore or UserProfile"
+                technicalLog = "No valid API key in CredentialStore or UserProfile for $activeProviderId"
             )
         }
 
-        val selectedModel = credentialStore.getSelectedModel("groq", "openai/gpt-oss-120b")
+        val selectedModel = aiProviderManager.getSelectedModel(activeProviderId)
 
         val budget = TaskBudget(
             maxSteps = maxSteps,
@@ -977,7 +984,7 @@ object DeviceAgentExecutor {
             initialState = AgentState.PLANNING
         )
 
-        val brain = AgentBrain()
+        val brain = AgentBrain(aiProviderManager = aiProviderManager)
         val intentType = IntentRouter.classifyIntent(goalPrompt).intent
 
         onStatusUpdate?.invoke("Ekran inceleniyor ve plan oluşturuluyor...")
@@ -985,7 +992,8 @@ object DeviceAgentExecutor {
         val plan = brain.initializeTask(
             userPrompt = goalPrompt,
             snapshot = initialSnapshot,
-            apiKey = groqKey,
+            apiKey = apiKey,
+            providerId = activeProviderId,
             intentType = intentType,
             model = selectedModel
         )
@@ -1038,7 +1046,8 @@ object DeviceAgentExecutor {
             val proposal = brain.proposeNextAction(
                 snapshot = beforeSnapshot,
                 screenFingerprint = screenFingerprint,
-                apiKey = groqKey,
+                apiKey = apiKey,
+                providerId = activeProviderId,
                 model = selectedModel
             )
 
@@ -1054,7 +1063,7 @@ object DeviceAgentExecutor {
                 } else {
                     Log.w(TAG, "Task COMPLETE teklifi ekran doğrulamasından geçemedi. RePlan yapılıyor.")
                     brain.workingMemory.recordFailure(currentStep, "COMPLETE", "Ekran tamamlanma kriterini doğrulamıyor.")
-                    brain.replan(beforeSnapshot, groqKey, selectedModel)
+                    brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
                     currentStep++
                     continue
                 }
@@ -1063,7 +1072,7 @@ object DeviceAgentExecutor {
             if (proposal.actionType == BrainActionType.REPLAN) {
                 onStatusUpdate?.invoke("Yeniden planlanıyor...")
                 AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Yeniden planlanıyor...")
-                brain.replan(beforeSnapshot, groqKey, selectedModel)
+                brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
                 currentStep++
                 continue
             }
@@ -1098,7 +1107,7 @@ object DeviceAgentExecutor {
                 onStatusUpdate?.invoke(blockedMsg)
 
                 brain.workingMemory.recordFailure(currentStep, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
-                brain.replan(beforeSnapshot, groqKey, selectedModel)
+                brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
                 currentStep++
                 continue
             }
@@ -1130,7 +1139,7 @@ object DeviceAgentExecutor {
 
             if (!verification.isVerified && brain.workingMemory.state.consecutiveFailures >= 3) {
                 Log.w(TAG, "3 üst üste başarısız eylem. REPLAN tetikleniyor.")
-                brain.replan(afterSnapshot, groqKey, selectedModel)
+                brain.replan(afterSnapshot, apiKey, activeProviderId, selectedModel)
             }
 
             currentStep++

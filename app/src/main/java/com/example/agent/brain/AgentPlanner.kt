@@ -17,10 +17,7 @@ import java.util.concurrent.TimeUnit
  * Groq API'sini kullanarak kullanıcı hedefinden ve TaskSpec'ten dinamik çok adımlı AgentPlan üreten planlama bileşeni.
  */
 class AgentPlanner(
-    private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+    private val aiProviderManager: com.example.ai.AIProviderManager? = null
 ) {
 
     companion object {
@@ -40,12 +37,13 @@ class AgentPlanner(
         workingMemory: AgentWorkingMemory,
         snapshot: ScreenSnapshot?,
         apiKey: String,
+        providerId: String = "groq",
         model: String = DEFAULT_MODEL
     ): AgentPlan = withContext(Dispatchers.IO) {
         lastUsedModel = model
 
         if (apiKey.isBlank()) {
-            Log.w(TAG, "Groq API key bulunamadı. Güvenli varsayılan plan türetiliyor.")
+            Log.w(TAG, "API key bulunamadı. Güvenli varsayılan plan türetiliyor.")
             return@withContext createFallbackPlan(taskSpec)
         }
 
@@ -109,43 +107,55 @@ class AgentPlanner(
                 SAFETY CONSTRAINTS: ${taskSpec.constraints.joinToString(", ")}
             """.trimIndent()
 
-            val messages = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "system")
-                    put("content", systemPrompt)
-                })
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", userPrompt)
-                })
+            val content = if (aiProviderManager != null) {
+                try {
+                    aiProviderManager.generateStructuralContent(
+                        providerId = providerId,
+                        systemPrompt = systemPrompt,
+                        userPrompt = userPrompt,
+                        onError = { err -> Log.e(TAG, "Provider error: $err") }
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Provider exception: ${e.message}")
+                    ""
+                }
+            } else {
+                // Fallback to old behavior if no provider manager
+                val messages = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", systemPrompt)
+                    })
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", userPrompt)
+                    })
+                }
+                val requestBodyJson = JSONObject().apply {
+                    put("model", model.ifBlank { DEFAULT_MODEL })
+                    put("messages", messages)
+                    put("temperature", 0.1)
+                    put("max_tokens", 500)
+                }.toString()
+                val request = Request.Builder()
+                    .url(GROQ_ENDPOINT)
+                    .header("Authorization", "Bearer ${apiKey.trim()}")
+                    .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                val response = OkHttpClient().newCall(request).execute()
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "API başarısız: HTTP ${response.code}")
+                    return@withContext createFallbackPlan(taskSpec)
+                }
+                val responseBody = response.body?.string() ?: ""
+                JSONObject(responseBody).getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                    .getString("content")
+                    .trim()
             }
 
-            val requestBodyJson = JSONObject().apply {
-                put("model", model.ifBlank { DEFAULT_MODEL })
-                put("messages", messages)
-                put("temperature", 0.1)
-                put("max_tokens", 500)
-            }.toString()
-
-            val request = Request.Builder()
-                .url(GROQ_ENDPOINT)
-                .header("Authorization", "Bearer ${apiKey.trim()}")
-                .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                .build()
-
-            val response = okHttpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.e(TAG, "Groq Planner API başarısız: HTTP ${response.code}")
-                return@withContext createFallbackPlan(taskSpec)
-            }
-
-            val responseBody = response.body?.string() ?: ""
-            val jsonResponse = JSONObject(responseBody)
-            val content = jsonResponse.getJSONArray("choices")
-                .getJSONObject(0)
-                .getJSONObject("message")
-                .getString("content")
-                .trim()
+            if (content.isBlank()) return@withContext createFallbackPlan(taskSpec)
 
             val parsedPlan = parsePlanJson(content, taskSpec)
             if (parsedPlan != null && parsedPlan.subGoals.isNotEmpty()) {

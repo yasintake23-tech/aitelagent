@@ -76,17 +76,23 @@ object StructuredExplorationEngine {
         val credentialStore = CredentialStore(context)
         val dbProfile = withContext(Dispatchers.IO) { database.userProfileDao().getUserProfileOnce() }
 
-        val groqKey = credentialStore.getApiKey("groq").ifBlank {
-            if (dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) == "groq") dbProfile?.customApiKey ?: "" else ""
+        val aiProviderManager = com.example.ai.AIProviderManager(
+            com.example.data.repository.MemoryRepository(database.userProfileDao(), database.memoryDao()),
+            credentialStore
+        )
+        val activeProviderId = dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini"
+        val apiKey = aiProviderManager.getApiKey(activeProviderId).ifBlank {
+            dbProfile?.customApiKey ?: ""
         }
-        val selectedModel = credentialStore.getSelectedModel("groq", "openai/gpt-oss-120b")
+        val selectedModel = aiProviderManager.getSelectedModel(activeProviderId)
 
-        val brain = AgentBrain()
+        val brain = AgentBrain(aiProviderManager = aiProviderManager)
         val initialSnapshot = service.extractLiveScreenSnapshot()
         brain.initializeTask(
             userPrompt = taskPrompt,
             snapshot = initialSnapshot,
-            apiKey = groqKey,
+            apiKey = apiKey,
+            providerId = activeProviderId,
             intentType = UserIntent.EXPLORATION_TASK,
             model = selectedModel
         )
@@ -152,7 +158,8 @@ object StructuredExplorationEngine {
                 val proposal = brain.proposeNextAction(
                     snapshot = snapshot,
                     screenFingerprint = currentFingerprint.value,
-                    apiKey = groqKey,
+                    apiKey = apiKey,
+                    providerId = activeProviderId,
                     model = selectedModel
                 )
 
@@ -160,17 +167,27 @@ object StructuredExplorationEngine {
                 Log.d(TAG, "Adım ${session.stepCount} Kararı: ${proposal.actionType}, Açıklama: ${proposal.reason}")
 
                 // Görev tamamlama kararı geldiyse
-                if (proposal.actionType == BrainActionType.COMPLETE || proposal.actionType == BrainActionType.NO_ACTION) {
+                if (proposal.actionType == BrainActionType.COMPLETE || (proposal.actionType == BrainActionType.NO_ACTION && proposal.reason == "TASK_COMPLETE")) {
                     session.currentState = AgentState.COMPLETED
                     AgentLifecycleManager.completeSession(centralSession.taskId, proposal.reason.ifBlank { "Keşif başarıyla tamamlandı." })
                     onStatusUpdate(proposal.reason.ifBlank { "Keşif başarıyla tamamlandı." })
                     break
                 }
+                
+                if (proposal.actionType == BrainActionType.NO_ACTION) {
+                    val reason = proposal.reason
+                    if (reason != "TASK_COMPLETE") {
+                        session.currentState = AgentState.FAILED
+                        AgentLifecycleManager.failSession(centralSession.taskId, "Hata: $reason")
+                        onStatusUpdate("Hata: $reason")
+                        break
+                    }
+                }
 
                 if (proposal.actionType == BrainActionType.REPLAN) {
                     onStatusUpdate("Yeniden planlanıyor...")
                     AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.RECOVERING, session.stepCount, "Yeniden planlanıyor...")
-                    brain.replan(snapshot, groqKey, selectedModel)
+                    brain.replan(snapshot, apiKey, activeProviderId, selectedModel)
                     continue
                 }
 
@@ -197,7 +214,7 @@ object StructuredExplorationEngine {
                     onStatusUpdate(blockedMsg)
 
                     brain.workingMemory.recordFailure(session.stepCount, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
-                    brain.replan(snapshot, groqKey, selectedModel)
+                    brain.replan(snapshot, apiKey, activeProviderId, selectedModel)
                     continue
                 }
 

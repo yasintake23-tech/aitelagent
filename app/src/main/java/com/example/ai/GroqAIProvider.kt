@@ -185,4 +185,53 @@ class GroqAIProvider(
             localFallback.generateResponse(prompt, conversationHistory, memories, profile).collect { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
+
+    override suspend fun generateStructuralContent(
+        systemPrompt: String,
+        userPrompt: String,
+        apiKey: String,
+        model: String
+    ): String = withContext(Dispatchers.IO) {
+        val messagesArr = JSONArray()
+        
+        val sysObj = JSONObject()
+        sysObj.put("role", "system")
+        sysObj.put("content", systemPrompt)
+        messagesArr.put(sysObj)
+
+        val curObj = JSONObject()
+        curObj.put("role", "user")
+        curObj.put("content", userPrompt)
+        messagesArr.put(curObj)
+
+        val selectedModel = if (model.isNotBlank() && availableModels.contains(model)) {
+            model
+        } else {
+            DEFAULT_MODEL
+        }
+        val rootJson = JSONObject()
+        rootJson.put("model", selectedModel)
+        rootJson.put("messages", messagesArr)
+        rootJson.put("temperature", 0.0)
+        rootJson.put("response_format", JSONObject().put("type", "json_object"))
+
+        val request = Request.Builder()
+            .url("https://api.groq.com/openai/v1/chat/completions")
+            .header("Authorization", "Bearer ${apiKey.trim()}")
+            .post(rootJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val response = okHttpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val code = response.code
+            val body = response.body?.string() ?: ""
+            throw RuntimeException("HTTP $code: $body")
+        }
+
+        val respStr = response.body?.string() ?: ""
+        val respJson = JSONObject(respStr)
+        val choices = respJson.getJSONArray("choices")
+        val firstChoice = choices.getJSONObject(0)
+        firstChoice.getJSONObject("message").getString("content")
+    }
 }

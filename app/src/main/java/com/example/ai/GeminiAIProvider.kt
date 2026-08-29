@@ -228,4 +228,43 @@ class GeminiAIProvider(
             }
         }
     }.flowOn(Dispatchers.IO)
+
+    override suspend fun generateStructuralContent(
+        systemPrompt: String,
+        userPrompt: String,
+        apiKey: String,
+        model: String
+    ): String = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val requestObj = GeminiRequest(
+            contents = listOf(
+                GeminiContent(
+                    role = "user",
+                    parts = listOf(GeminiPart(text = userPrompt))
+                )
+            ),
+            systemInstruction = GeminiContent(parts = listOf(GeminiPart(text = systemPrompt)))
+        )
+
+        val jsonAdapter = moshi.adapter(GeminiRequest::class.java)
+        val requestBodyJson = jsonAdapter.toJson(requestObj)
+        val selectedModel = model.takeIf { it.isNotBlank() } ?: defaultModel
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$selectedModel:generateContent?key=$apiKey"
+
+        val request = Request.Builder()
+            .url(url)
+            .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val response = okHttpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val code = response.code
+            val body = response.body?.string() ?: ""
+            throw RuntimeException("HTTP $code: $body")
+        }
+
+        val respBodyStr = response.body?.string()
+        val respAdapter = moshi.adapter(GeminiResponse::class.java)
+        val geminiResp = respAdapter.fromJson(respBodyStr ?: "{}")
+        geminiResp?.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: ""
+    }
 }

@@ -33,5 +33,12 @@ interface AIProvider {
         overrideModel: String? = null,
         onError: ((String) -> Unit)? = null
     ): Flow<String>
+
+    suspend fun generateStructuralContent(
+        systemPrompt: String,
+        userPrompt: String,
+        apiKey: String,
+        model: String
+    ): String = ""
 }
 

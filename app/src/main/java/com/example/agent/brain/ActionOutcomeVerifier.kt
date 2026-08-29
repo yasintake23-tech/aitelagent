@@ -18,7 +18,8 @@ object ActionOutcomeVerifier {
     fun verifyOutcome(
         beforeSnapshot: ScreenSnapshot?,
         afterSnapshot: ScreenSnapshot?,
-        expectedOutcome: ExpectedOutcomeSpec?
+        expectedOutcome: ExpectedOutcomeSpec?,
+        actionType: String? = null
     ): VerificationResult {
         if (expectedOutcome == null) {
             return VerificationResult(true, "Beklenen durum belirtilmemiş. Doğrulandı kabul ediliyor.")
@@ -33,8 +34,17 @@ object ActionOutcomeVerifier {
             val samePackage = beforeSnapshot.packageName == afterSnapshot.packageName
             val sameActivity = beforeSnapshot.activityName == afterSnapshot.activityName
             val sameTexts = beforeSnapshot.texts == afterSnapshot.texts
+            
+            // Allow actions that might not visibly change everything but still succeed
+            val isActionTolerated = actionType == AgentActionType.TYPE_TEXT ||
+                                    actionType == AgentActionType.SWIPE_UP ||
+                                    actionType == AgentActionType.SWIPE_DOWN ||
+                                    actionType == AgentActionType.SWIPE_LEFT ||
+                                    actionType == AgentActionType.SWIPE_RIGHT ||
+                                    actionType == AgentActionType.CLICK_NODE ||
+                                    actionType == AgentActionType.CLICK_COORD
 
-            if (samePackage && sameActivity && sameTexts) {
+            if (samePackage && sameActivity && sameTexts && !isActionTolerated) {
                 return VerificationResult(false, "Ekran değişikliği beklendi ancak ekran durumu değişmedi.")
             }
         }

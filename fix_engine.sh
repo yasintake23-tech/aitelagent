@@ -1,0 +1,1 @@
+sed -i 's/if (reason == "API_KEY_MISSING" || reason.startsWith("PROVIDER_ERROR") || reason.startsWith("MODEL_ERROR")) {/if (reason != "TASK_COMPLETE") {/g' app/src/main/java/com/example/agent/core/StructuredExplorationEngine.kt

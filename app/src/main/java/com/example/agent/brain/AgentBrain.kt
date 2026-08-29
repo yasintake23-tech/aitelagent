@@ -21,8 +21,9 @@ import java.util.concurrent.TimeUnit
  * UNDERSTAND -> PLAN -> OBSERVE -> REASON -> PROPOSE -> SAFETY CHECK -> ACT -> VERIFY -> REMEMBER -> REPLAN
  */
 class AgentBrain(
+    val aiProviderManager: com.example.ai.AIProviderManager? = null,
     val workingMemory: AgentWorkingMemory = AgentWorkingMemory(),
-    private val planner: AgentPlanner = AgentPlanner(),
+    private val planner: AgentPlanner = AgentPlanner(aiProviderManager),
     val stateGraph: ScreenStateGraph = ScreenStateGraph(),
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -53,6 +54,7 @@ class AgentBrain(
         userPrompt: String,
         snapshot: ScreenSnapshot?,
         apiKey: String,
+        providerId: String = "groq",
         intentType: UserIntent = UserIntent.DEVICE_TASK,
         model: String? = null
     ): AgentPlan {
@@ -61,7 +63,7 @@ class AgentBrain(
         stateGraph.reset()
 
         // 1. TaskSpec oluştur
-        val taskSpec = parseTaskSpecFromGoal(userPrompt, intentType, apiKey, model)
+        val taskSpec = parseTaskSpecFromGoal(userPrompt, intentType, apiKey, providerId, model)
         currentTaskSpec = taskSpec
 
         // 2. Dinamik Plan Oluştur
@@ -70,6 +72,7 @@ class AgentBrain(
             workingMemory = workingMemory,
             snapshot = snapshot,
             apiKey = apiKey,
+            providerId = providerId,
             model = model ?: DEFAULT_MODEL
         )
 
@@ -88,6 +91,7 @@ class AgentBrain(
     suspend fun replan(
         snapshot: ScreenSnapshot?,
         apiKey: String,
+        providerId: String = "groq",
         model: String? = null
     ): AgentPlan {
         val taskSpec = currentTaskSpec ?: TaskSpec(workingMemory.state.originalGoal)
@@ -98,6 +102,7 @@ class AgentBrain(
             workingMemory = workingMemory,
             snapshot = snapshot,
             apiKey = apiKey,
+            providerId = providerId,
             model = model ?: DEFAULT_MODEL
         )
 
@@ -113,10 +118,13 @@ class AgentBrain(
     /**
      * Ekran durumunu gözlemler, çalışma belleğini günceller ve LLM üzerinden yapılandırılmış eylem önerisi (ActionProposal) ister.
      */
+    private var consecutiveReplanFailures = 0
+
     suspend fun proposeNextAction(
         snapshot: ScreenSnapshot,
         screenFingerprint: String,
         apiKey: String,
+        providerId: String = "groq",
         model: String = DEFAULT_MODEL
     ): ActionProposal = withContext(Dispatchers.IO) {
 
@@ -132,14 +140,20 @@ class AgentBrain(
 
         // Groq API Key kontrolü
         if (apiKey.isBlank()) {
-            Log.e(TAG, "Groq API Key eksik. Rastgele tıklama YAPILMAYACAK. NO_ACTION dönülüyor.")
+            Log.e(TAG, "API Key eksik. Rastgele tıklama YAPILMAYACAK. NO_ACTION dönülüyor.")
             return@withContext ActionProposal(
                 actionType = AgentActionType.NO_ACTION,
-                reason = "API Key tanımlı değil. Güvenlik nedeniyle işlem durduruldu."
+                reason = "API_KEY_MISSING"
             )
         }
 
-        // Anti-Loop Kontrolü 1: Aynı ekran üst üste 3 kez tekrarlandı mı?
+        if (consecutiveReplanFailures > 2) {
+            Log.e(TAG, "Maksimum ardışık replan hatası aşıldı.")
+            return@withContext ActionProposal(
+                actionType = AgentActionType.NO_ACTION,
+                reason = "PROVIDER_ERROR"
+            )
+        }
         val recentFingerprints = memoryState.screenVisitHistory.takeLast(3)
         if (recentFingerprints.size >= 3 && recentFingerprints.all { it == screenFingerprint }) {
             Log.w(TAG, "Aynı ekran ($screenFingerprint) 3 kez tekrarlandı. Tıkanıklık tespit edildi, REPLAN tetikleniyor.")
@@ -270,47 +284,82 @@ class AgentBrain(
                 $clickableList
             """.trimIndent()
 
-            val messages = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "system")
-                    put("content", systemPrompt)
-                })
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", userPrompt)
-                })
+            val content = if (aiProviderManager != null) {
+                try {
+                    aiProviderManager.generateStructuralContent(
+                        providerId = providerId,
+                        systemPrompt = systemPrompt,
+                        userPrompt = userPrompt
+                    )
+                } catch (e: Exception) {
+                    val codeMatch = Regex("HTTP (\\d+)").find(e.message ?: "")
+                    val code = codeMatch?.groupValues?.get(1)?.toIntOrNull() ?: 500
+                    
+                    val errMsg = if (code == 400 || code == 404) {
+                        "MODEL_ERROR: HTTP $code - Geçersiz model ($model) veya istek formatı. Yanıt: ${e.message}"
+                    } else if (code == 401 || code == 403) {
+                        "API_KEY_MISSING: HTTP $code - Geçersiz/yetkisiz API Key."
+                    } else if (code == 429) {
+                        "PROVIDER_ERROR: HTTP $code - Rate limit aşıldı."
+                    } else {
+                        "PROVIDER_ERROR: HTTP $code - Sunucu hatası: ${e.message}"
+                    }
+                    
+                    Log.e(TAG, "Provider ($providerId, Model: $model) Hatası: $errMsg")
+                    consecutiveReplanFailures++
+                    return@withContext ActionProposal(
+                        actionType = AgentActionType.REPLAN,
+                        reason = errMsg
+                    )
+                }
+            } else {
+                val messages = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", systemPrompt)
+                    })
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", userPrompt)
+                    })
+                }
+                val requestBodyJson = JSONObject().apply {
+                    put("model", model.ifBlank { DEFAULT_MODEL })
+                    put("messages", messages)
+                    put("temperature", 0.1)
+                    put("max_tokens", 350)
+                }.toString()
+                val request = Request.Builder()
+                    .url(GROQ_ENDPOINT)
+                    .header("Authorization", "Bearer ${apiKey.trim()}")
+                    .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                val response = OkHttpClient().newCall(request).execute()
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Reasoner API hatası: HTTP ${response.code}")
+                    consecutiveReplanFailures++
+                    return@withContext ActionProposal(
+                        actionType = AgentActionType.REPLAN,
+                        reason = "PROVIDER_ERROR"
+                    )
+                }
+                val responseBody = response.body?.string() ?: ""
+                JSONObject(responseBody).getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                    .getString("content")
+                    .trim()
             }
 
-            val requestBodyJson = JSONObject().apply {
-                put("model", model.ifBlank { DEFAULT_MODEL })
-                put("messages", messages)
-                put("temperature", 0.1)
-                put("max_tokens", 350)
-            }.toString()
-
-            val request = Request.Builder()
-                .url(GROQ_ENDPOINT)
-                .header("Authorization", "Bearer ${apiKey.trim()}")
-                .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                .build()
-
-            val response = okHttpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.e(TAG, "Groq Reasoner API hatası: HTTP ${response.code}")
+            consecutiveReplanFailures = 0
+            
+            if (content.isBlank()) {
                 return@withContext ActionProposal(
-                    actionType = AgentActionType.REPLAN,
-                    reason = "API bağlantı hatası (HTTP ${response.code}). Yeniden planlanıyor."
+                    actionType = AgentActionType.NO_ACTION,
+                    reason = "NO_VALID_ACTION"
                 )
             }
-
-            val responseBody = response.body?.string() ?: ""
-            val jsonResponse = JSONObject(responseBody)
-            val content = jsonResponse.getJSONArray("choices")
-                .getJSONObject(0)
-                .getJSONObject("message")
-                .getString("content")
-                .trim()
-
+            
             val proposal = parseActionProposalJson(content)
             if (proposal != null) {
                 // Anti-Loop / Blocked Route Kontrolü
@@ -397,7 +446,8 @@ class AgentBrain(
         val verification = ActionOutcomeVerifier.verifyOutcome(
             beforeSnapshot = beforeSnapshot,
             afterSnapshot = afterSnapshot,
-            expectedOutcome = proposal.expectedOutcome
+            expectedOutcome = proposal.expectedOutcome,
+            actionType = proposal.actionType
         )
 
         val currentStep = workingMemory.state.currentStepIndex + 1
@@ -509,6 +559,7 @@ class AgentBrain(
         goal: String,
         intentType: UserIntent,
         apiKey: String = "",
+        providerId: String = "groq",
         model: String? = null
     ): TaskSpec = withContext(Dispatchers.IO) {
         if (apiKey.isNotBlank()) {
@@ -538,43 +589,61 @@ class AgentBrain(
                     Kesinlikle sadece saf JSON döndür, açıklama veya markdown tırnakları ekleme.
                 """.trimIndent()
 
-                val messages = JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "system")
-                        put("content", systemPrompt)
-                    })
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", goal)
-                    })
+                val content = if (aiProviderManager != null) {
+                    try {
+                        aiProviderManager.generateStructuralContent(
+                            providerId = providerId,
+                            systemPrompt = systemPrompt,
+                            userPrompt = goal,
+                            onError = { err -> Log.e(TAG, "Provider error in TaskSpec: $err") }
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Provider exception in TaskSpec: ${e.message}")
+                        ""
+                    }
+                } else {
+                    val messages = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", systemPrompt)
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", goal)
+                        })
+                    }
+
+                    val requestBodyJson = JSONObject().apply {
+                        put("model", model?.ifBlank { DEFAULT_MODEL } ?: DEFAULT_MODEL)
+                        put("messages", messages)
+                        put("temperature", 0.0)
+                        put("max_tokens", 250)
+                    }.toString()
+
+                    val request = Request.Builder()
+                        .url(GROQ_ENDPOINT)
+                        .header("Authorization", "Bearer ${apiKey.trim()}")
+                        .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .build()
+
+                    val response = OkHttpClient().newCall(request).execute()
+                    if (response.isSuccessful) {
+                        val responseBody = response.body?.string() ?: ""
+                        val jsonResponse = JSONObject(responseBody)
+                        jsonResponse.getJSONArray("choices")
+                            .getJSONObject(0)
+                            .getJSONObject("message")
+                            .getString("content")
+                            .trim()
+                    } else {
+                        ""
+                    }
                 }
 
-                val requestBodyJson = JSONObject().apply {
-                    put("model", model?.ifBlank { DEFAULT_MODEL } ?: DEFAULT_MODEL)
-                    put("messages", messages)
-                    put("temperature", 0.0)
-                    put("max_tokens", 250)
-                }.toString()
-
-                val request = Request.Builder()
-                    .url(GROQ_ENDPOINT)
-                    .header("Authorization", "Bearer ${apiKey.trim()}")
-                    .post(requestBodyJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
-
-                val response = okHttpClient.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val responseBody = response.body?.string() ?: ""
-                    val jsonResponse = JSONObject(responseBody)
-                    val content = jsonResponse.getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                        .getString("content")
-                        .trim()
-                    
+                if (content.isNotBlank()) {
                     val cleanJson = content.substringAfter("{").substringBeforeLast("}").let { "{$it}" }
                     val root = JSONObject(cleanJson)
-                    
+
                     val parsedTargetApp = root.optString("targetApp", null).takeIf { !it.isNull_or_blank_and_null_str() }
                     val parsedTargetEntity = root.optString("targetEntity", null).takeIf { !it.isNull_or_blank_and_null_str() }
                     val parsedRequestedAction = root.optString("requestedAction", null).takeIf { !it.isNull_or_blank_and_null_str() }
