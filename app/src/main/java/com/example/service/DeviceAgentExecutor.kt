@@ -480,6 +480,132 @@ object DeviceAgentExecutor {
     }
 
     /**
+     * Handles explicit navigation/system commands before they enter the AI planner.
+     * Returns a successful result only when a concrete physical/system action was dispatched.
+     */
+    suspend fun performNavigation(command: String): AgentExecutionResult = withContext(Dispatchers.Main) {
+        val service = AiDeviceAccessibilityService.instance
+            ?: return@withContext AgentExecutionResult(
+                isSuccess = false,
+                actionType = "ACCESSIBILITY_UNAVAILABLE",
+                speechFeedback = "Cihaz kontrolü için Erişilebilirlik izni gerekli.",
+                technicalLog = "performNavigation: AccessibilityService is null"
+            )
+
+        val lower = command.lowercase(Locale("tr", "TR")).trim()
+
+        suspend fun swipeResult(action: String, block: suspend () -> Unit): AgentExecutionResult {
+            block()
+            return AgentExecutionResult(
+                isSuccess = true,
+                actionType = action,
+                speechFeedback = "Tamam, $action yapıldı.",
+                technicalLog = "performNavigation dispatched: $action"
+            )
+        }
+
+        when {
+            lower in setOf("geri", "geri dön", "geri git", "back", "önceki") ||
+                    lower.contains("geri dön") || lower.contains("geri git") -> {
+                val ok = service.goBack()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "PRESS_BACK",
+                    speechFeedback = if (ok) "Geri gidildi." else "Geri işlemi gerçekleştirilemedi.",
+                    technicalLog = "performNavigation PRESS_BACK=$ok"
+                )
+            }
+
+            lower in setOf("ana sayfa", "ana ekrana dön", "eve git", "home") ||
+                    lower.contains("ana sayfaya git") || lower.contains("ana ekrana dön") -> {
+                val ok = service.goHome()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "PRESS_HOME",
+                    speechFeedback = if (ok) "Ana ekrana gidildi." else "Ana ekrana gidilemedi.",
+                    technicalLog = "performNavigation PRESS_HOME=$ok"
+                )
+            }
+
+            lower.contains("aşağı kaydır") || lower.contains("aşağıya kaydır") ||
+                    lower.contains("aşağı kaydırma") -> return@withContext swipeResult("SWIPE_DOWN") {
+                service.swipeDownAsync()
+            }
+
+            lower.contains("yukarı kaydır") || lower.contains("yukarıya kaydır") ||
+                    lower.contains("yukarı kaydırma") -> return@withContext swipeResult("SWIPE_UP") {
+                service.swipeUpAsync()
+            }
+
+            lower.contains("sola kaydır") || lower.contains("sola sürükle") -> return@withContext swipeResult("SWIPE_LEFT") {
+                service.swipeLeftAsync()
+            }
+
+            lower.contains("sağa kaydır") || lower.contains("sağa sürükle") -> return@withContext swipeResult("SWIPE_RIGHT") {
+                service.swipeRightAsync()
+            }
+
+            lower.contains("bildirimleri aç") || lower.contains("bildirim paneli") ||
+                    lower == "bildirimler" -> {
+                val ok = service.openNotifications()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "OPEN_NOTIFICATIONS",
+                    speechFeedback = if (ok) "Bildirimler açıldı." else "Bildirimler açılamadı.",
+                    technicalLog = "performNavigation OPEN_NOTIFICATIONS=$ok"
+                )
+            }
+
+            lower.contains("hızlı ayarları aç") || lower.contains("hızlı ayarlar") -> {
+                val ok = service.openQuickSettings()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "OPEN_QUICK_SETTINGS",
+                    speechFeedback = if (ok) "Hızlı ayarlar açıldı." else "Hızlı ayarlar açılamadı.",
+                    technicalLog = "performNavigation OPEN_QUICK_SETTINGS=$ok"
+                )
+            }
+
+            lower.contains("son uygulamalar") || lower.contains("uygulama geçmişi") || lower == "recents" -> {
+                val ok = service.pressRecents()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "PRESS_RECENTS",
+                    speechFeedback = if (ok) "Son uygulamalar açıldı." else "Son uygulamalar açılamadı.",
+                    technicalLog = "performNavigation PRESS_RECENTS=$ok"
+                )
+            }
+
+            lower.contains("sesi aç") || lower.contains("sesi yükselt") || lower.contains("ses artır") -> {
+                val ok = service.volumeUp()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "VOLUME_UP",
+                    speechFeedback = if (ok) "Ses yükseltildi." else "Ses yükseltilemedi.",
+                    technicalLog = "performNavigation VOLUME_UP=$ok"
+                )
+            }
+
+            lower.contains("sesi kıs") || lower.contains("sesi azalt") || lower.contains("ses kıs") -> {
+                val ok = service.volumeDown()
+                return@withContext AgentExecutionResult(
+                    isSuccess = ok,
+                    actionType = "VOLUME_DOWN",
+                    speechFeedback = if (ok) "Ses kısıldı." else "Ses kısılamadı.",
+                    technicalLog = "performNavigation VOLUME_DOWN=$ok"
+                )
+            }
+        }
+
+        return@withContext AgentExecutionResult(
+            isSuccess = false,
+            actionType = "NOT_A_NAVIGATION_COMMAND",
+            speechFeedback = "",
+            technicalLog = "performNavigation: no navigation match for '$command'"
+        )
+    }
+
+    /**
      * AgentBrain tabanlı otonom görev yürütücü.
      * TaskSpec -> Dynamic Plan -> Observe -> Reason -> Safety Gate -> Physical Act -> Verification -> Memory -> RePlan
      */
