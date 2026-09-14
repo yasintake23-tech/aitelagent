@@ -12,6 +12,7 @@ import com.example.data.model.MemoryCategory
 import com.example.data.model.MemoryEntryEntity
 import com.example.data.model.UserProfileEntity
 import com.example.data.security.CredentialStore
+import com.example.data.security.AgentLogStore
 import com.example.service.AiDeviceAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -81,6 +82,9 @@ object StructuredExplorationEngine {
         )
 
         val activeBrain = brain ?: throw IllegalArgumentException("AgentBrain must be provided for Multi-Brain exploration")
+        if (!activeBrain.isMultiBrainEnabled()) {
+            throw IllegalStateException("Multi-Brain AgentBrain etkin değil; eski keşif motoru yolu kapalı.")
+        }
         val multiBrainActive = activeBrain.isMultiBrainEnabled()
         val architecture = if (multiBrainActive) credentialStore.getMultiBrainArchitecture() else "SINGLE"
         val activeProviderId = if (multiBrainActive) "groq" else (dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini")
@@ -161,6 +165,7 @@ object StructuredExplorationEngine {
                 session.currentState = AgentState.PLANNING
                 AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.PLANNING, session.stepCount, "Planlanıyor...")
 
+                // AgentBrain captures a fresh screenshot for Multi-Brain Vision before deciding.
                 val proposal = activeBrain.proposeNextAction(
                     snapshot = snapshot,
                     screenFingerprint = currentFingerprint.value,
@@ -171,6 +176,7 @@ object StructuredExplorationEngine {
 
                 onStatusUpdate(proposal.reason.ifBlank { "Ekran inceleniyor..." })
                 Log.d(TAG, "Adım ${session.stepCount} Kararı: ${proposal.actionType}, Açıklama: ${proposal.reason}")
+                AgentLogStore.record(context, "INFO", TAG, "Step ${session.stepCount}: ${proposal.actionType}; target=${proposal.target}; x=${proposal.x}; y=${proposal.y}")
 
                 // Görev tamamlama kararı geldiyse
                 if (proposal.actionType == BrainActionType.COMPLETE || (proposal.actionType == BrainActionType.NO_ACTION && proposal.reason == "TASK_COMPLETE")) {
@@ -200,10 +206,10 @@ object StructuredExplorationEngine {
                 // 4. SAFETY GUARDIAN GATE
                 val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
                     snapshot.clickableNodes[proposal.targetIndex]
-                } else if (proposal.target != null) {
+                } else if (!proposal.target.isNullOrBlank()) {
                     snapshot.clickableNodes.firstOrNull { node ->
                         val txt = node.text.ifBlank { node.contentDescription }
-                        txt.contains(proposal.target, ignoreCase = true)
+                        txt.isNotBlank() && txt.contains(proposal.target, ignoreCase = true)
                     }
                 } else null
 
@@ -252,9 +258,10 @@ object StructuredExplorationEngine {
                 } else if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
                     val n = snapshot.clickableNodes[proposal.targetIndex]
                     PointF(n.bounds.centerX().toFloat(), n.bounds.centerY().toFloat())
-                } else if (proposal.target != null) {
+                } else if (!proposal.target.isNullOrBlank()) {
                     val n = snapshot.clickableNodes.firstOrNull {
-                        it.text.contains(proposal.target, ignoreCase = true) || it.contentDescription.contains(proposal.target, ignoreCase = true)
+                        val label = it.text.ifBlank { it.contentDescription }
+                        label.isNotBlank() && label.contains(proposal.target, ignoreCase = true)
                     }
                     n?.let { PointF(it.bounds.centerX().toFloat(), it.bounds.centerY().toFloat()) }
                 } else null
@@ -295,15 +302,20 @@ object StructuredExplorationEngine {
                     }
                     BrainActionType.OPEN_APP -> {
                         val appTarget = proposal.target?.takeIf { it.isNotBlank() }
-                        if (targetNode != null) {
-                            service.clickAtWithVerification(
+                        when {
+                            targetNode != null -> service.clickAtWithVerification(
                                 targetNode.bounds.centerX().toFloat(),
                                 targetNode.bounds.centerY().toFloat(),
                                 appTarget ?: "uygulama",
                                 targetNode = targetNode
                             )
-                        } else {
-                            onStatusUpdate("Uygulama simgesi güvenilir biçimde bulunamadı; yeniden planlanıyor...")
+                            proposal.x != null && proposal.y != null -> service.clickAtWithVerification(
+                                proposal.x.toFloat(),
+                                proposal.y.toFloat(),
+                                appTarget ?: "Vision uygulama adayı",
+                                targetNode = null
+                            )
+                            else -> onStatusUpdate("Uygulama simgesi güvenilir biçimde bulunamadı; yeniden planlanıyor...")
                         }
                     }
                     BrainActionType.OPEN_QUICK_SETTINGS -> {
@@ -410,6 +422,7 @@ object StructuredExplorationEngine {
 
         } catch (e: Exception) {
             Log.e(TAG, "Exploration execution error", e)
+            AgentLogStore.record(context, "ERROR", TAG, "Exploration execution error: ${e.localizedMessage}")
             session.currentState = AgentState.FAILED
             AgentLifecycleManager.failSession(centralSession.taskId, e.localizedMessage ?: "Bilinmeyen hata")
             onStatusUpdate("Keşif duraklatıldı: ${e.localizedMessage}")

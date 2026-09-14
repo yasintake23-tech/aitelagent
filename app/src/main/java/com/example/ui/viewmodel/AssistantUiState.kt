@@ -49,5 +49,6 @@ data class AssistantUiState(
     ),
     val liveScreenshot: Bitmap? = null,
     val virtualFingerState: VirtualFingerState? = null,
-    val error: String? = null
+    val error: String? = null,
+    val diagnosticLogs: List<com.example.data.security.AgentLogStore.Entry> = emptyList()
 )

@@ -8,6 +8,7 @@ import com.example.service.ScreenNodeData
 import com.example.service.ScreenSnapshot
 import com.example.agent.multibrain.MultiBrainOrchestrator
 import com.example.agent.multibrain.ScreenContext
+import com.example.data.security.AgentLogStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -202,11 +203,31 @@ class AgentBrain(
                 reason = "MULTI_BRAIN_ERROR: Orchestrator not initialized."
             )
 
-            Log.d(TAG, "Multi-Brain Orchestrator is active. Coordinating...")
+            Log.d(TAG, "Multi-Brain Orchestrator is active. Coordinating with fresh screen capture...")
+
+            // Her karar turundan hemen önce canlı ekran görüntüsünü güncelle.
+            // Aksi halde Vision Brain eski/null bir görüntü alıp görevi gereksiz yere durdurabilir.
+            val liveScreenshot = withContext(Dispatchers.Main) {
+                val service = AiDeviceAccessibilityService.instance
+                val cached = AiDeviceAccessibilityService.liveScreenshotBitmap.value
+                var fresh: android.graphics.Bitmap? = null
+                if (service != null) {
+                    repeat(2) {
+                        fresh = service.captureLiveScreenshotAsync()
+                        if (fresh != null) return@repeat
+                        kotlinx.coroutines.delay(150L)
+                    }
+                }
+                fresh ?: cached
+            }
+
+            AiDeviceAccessibilityService.instance?.applicationContext?.let {
+                AgentLogStore.record(it, if (liveScreenshot != null) "INFO" else "WARN", TAG, "Fresh screen capture=${liveScreenshot != null}; package=${snapshot.packageName}")
+            }
 
             val screenContext = ScreenContext(
                 snapshot = snapshot,
-                screenshot = AiDeviceAccessibilityService.liveScreenshotBitmap.value,
+                screenshot = liveScreenshot,
                 packageName = snapshot.packageName,
                 activityName = snapshot.activityName
             )
@@ -216,6 +237,7 @@ class AgentBrain(
 
             if (response.messageType == com.example.agent.multibrain.AgentMessageType.ERROR) {
                 Log.e(TAG, "Multi-Brain Coordination Failed: ${response.decisionSummary}")
+                AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "ERROR", TAG, "Multi-Brain error: ${response.decisionSummary}") }
                 return@withContext ActionProposal(
                     actionType = AgentActionType.REPLAN,
                     reason = "MULTI_BRAIN_ERROR: ${response.decisionSummary}"

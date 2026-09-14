@@ -78,7 +78,9 @@ class MainActivity : ComponentActivity() {
                                 onClearChatHistory = { viewModel.clearChatHistory() },
                                 onReplayAwakening = { viewModel.replayAwakening() },
                                 onRefreshPermissions = { viewModel.checkAccessibilityStatus() },
-                                onClearError = { viewModel.clearError() }
+                                onClearError = { viewModel.clearError() },
+                                onLoadDiagnosticLogs = { viewModel.loadDiagnosticLogs() },
+                                onClearDiagnosticLogs = { viewModel.clearDiagnosticLogs() }
                             )
                         } else {
                             AwakeningScreen(

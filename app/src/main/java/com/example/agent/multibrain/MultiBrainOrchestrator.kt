@@ -4,6 +4,8 @@ import android.util.Log
 import com.example.agent.brain.ActionProposal
 import com.example.agent.brain.AgentActionType
 import com.example.agent.brain.AgentWorkingMemory
+import com.example.data.security.AgentLogStore
+import com.example.service.AiDeviceAccessibilityService
 
 /**
  * Deterministic hierarchical multi-brain council.
@@ -71,6 +73,7 @@ class MultiBrainOrchestrator(
             return createReplan(taskId, "Groq Reasoning sağlayıcısı başarısız oldu.", "REASONING_PROVIDER_ERROR")
         }
         messages.add(currentProposal)
+        AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "Groq initial proposal: ${currentProposal.proposedAction?.actionType}") }
 
         // 2) HF Vision: seçili 2/3-beyin mimarisinde her fiziksel adım için görsel grounding.
         val vision = visionBrain
@@ -79,19 +82,28 @@ class MultiBrainOrchestrator(
             return createReplan(taskId, "Multi-Brain fiziksel görev için canlı ekran görüntüsü gerekli.", "VISION_SCREENSHOT_MISSING")
         }
 
-        val observation = vision.analyzeScreen(context, currentProposal.proposedAction?.target).withTask(taskId)
+        val visionRequired = currentProposal.structuredPayload["visionRequired"]?.toBooleanStrictOrNull() == true
+        val targetMissing = currentProposal.structuredPayload["targetMissing"]?.toBooleanStrictOrNull() == true
+        val observation = if (visionRequired || targetMissing || currentProposal.confidence < 0.99) {
+            vision.analyzeScreen(context, currentProposal.proposedAction?.target).withTask(taskId)
+        } else {
+            AgentMessage(taskId, sender = "HF_VISION", receiver = "ORCHESTRATOR", messageType = AgentMessageType.OBSERVATION, decisionSummary = "Vision gereksiz olarak işaretlendi; ekran ağacı yeterli.", confidence = 1.0, structuredPayload = mapOf("skipped" to "true"))
+        }
         if (observation.messageType == AgentMessageType.ERROR) {
             return createReplan(taskId, "Vision sağlayıcısı başarısız oldu; başka AI'ya gizli geçiş yapılmayacak.", observation.errorCode ?: "VISION_PROVIDER_ERROR")
         }
         messages.add(observation)
+        AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "HF Vision: found=${observation.structuredPayload["found"]}; confidence=${observation.confidence}") }
 
         // 3) Groq: HF grounding bilgisini okuyup tek bir son ActionProposal üretir.
-        val refined = reasoning.proposeAction(goal, context, messages).withTask(taskId)
+        val refinedGoal = if (goal.isBlank()) "Ekrandaki mevcut duruma göre görevi ilerletecek tek güvenli adımı seç." else goal
+        val refined = reasoning.proposeAction(refinedGoal, context, messages).withTask(taskId)
         if (refined.messageType == AgentMessageType.ERROR) {
             return createReplan(taskId, "Vision sonrası Groq yeniden değerlendirmesi başarısız oldu.", "REFINEMENT_PROVIDER_ERROR")
         }
         currentProposal = refined
         messages.add(currentProposal)
+        AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "Groq refinement: ${currentProposal.proposedAction?.actionType}") }
 
         // 4) Gemini: 3-beyin mimarisinde her fiziksel adım için bağımsız ikinci görüş.
         if (currentArchitecture == Architecture.GROQ_HF_GEMINI) {
@@ -103,6 +115,7 @@ class MultiBrainOrchestrator(
                 return createReplan(taskId, "Gemini Advisor sağlayıcısı başarısız oldu.", advice.errorCode ?: "ADVISOR_PROVIDER_ERROR")
             }
             messages.add(advice)
+            AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "Gemini Advisor: agreement=${advice.structuredPayload["agreement"]}; risk=${advice.riskLevel}") }
 
             val agreement = advice.structuredPayload["agreement"]?.toBooleanStrictOrNull() ?: false
             val advisorHighRisk = advice.riskLevel == AgentRiskLevel.HIGH_RISK

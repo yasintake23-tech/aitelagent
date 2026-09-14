@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import com.example.data.security.AgentLogStore
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -190,12 +191,14 @@ class AiDeviceAccessibilityService : AccessibilityService() {
 
                         override fun onFailure(errorCode: Int) {
                             Log.e("AiAccessibility", "Screenshot capture failed: $errorCode")
+                            AgentLogStore.record(applicationContext, "ERROR", "AiAccessibility", "Screenshot capture failed: errorCode=$errorCode")
                             deferred.complete(null)
                         }
                     }
                 )
             } catch (e: Exception) {
                 Log.e("AiAccessibility", "Screenshot exception", e)
+                AgentLogStore.record(applicationContext, "ERROR", "AiAccessibility", "Screenshot exception: ${e.localizedMessage}")
                 deferred.complete(null)
             }
             deferred.await()

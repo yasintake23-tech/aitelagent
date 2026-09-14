@@ -109,14 +109,17 @@ class GroqReasoningBrainAdapter(
             val actionJson = json.optJSONObject("proposedAction")
             val actionType = actionJson?.optString("type", AgentActionType.NO_ACTION) ?: AgentActionType.NO_ACTION
             
+            val rawTarget = actionJson?.optString("targetId")?.trim().orEmpty()
+            val targetIndex = if (actionJson?.has("targetIndex") == true && !actionJson.isNull("targetIndex")) actionJson.optInt("targetIndex") else null
             val proposal = ActionProposal(
                 actionType = actionType,
-                target = actionJson?.optString("targetId"),
-                textPayload = actionJson?.optString("text"),
+                target = rawTarget.takeIf { it.isNotBlank() },
+                targetIndex = targetIndex,
+                textPayload = actionJson?.optString("text")?.takeIf { it.isNotBlank() },
                 x = if (actionJson?.has("x") == true && !actionJson.isNull("x")) actionJson.optInt("x") else null,
                 y = if (actionJson?.has("y") == true && !actionJson.isNull("y")) actionJson.optInt("y") else null,
                 reason = json.optString("decisionSummary", ""),
-                confidence = json.optDouble("confidence", 0.5)
+                confidence = json.optDouble("confidence", 0.5).coerceIn(0.0, 1.0)
             )
 
             AgentMessage(

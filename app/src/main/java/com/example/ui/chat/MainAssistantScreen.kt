@@ -165,7 +165,9 @@ fun MainAssistantScreen(
     onClearChatHistory: () -> Unit,
     onReplayAwakening: () -> Unit,
     onRefreshPermissions: () -> Unit,
-    onClearError: () -> Unit = {}
+    onClearError: () -> Unit = {},
+    onLoadDiagnosticLogs: () -> Unit = {},
+    onClearDiagnosticLogs: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -756,7 +758,10 @@ fun MainAssistantScreen(
                 onClearChatHistory()
                 showSettingsSheet = false
                 Toast.makeText(context, "Sohbet geçmişi temizlendi", Toast.LENGTH_SHORT).show()
-            }
+            },
+            diagnosticLogs = uiState.diagnosticLogs,
+            onOpenLogs = onLoadDiagnosticLogs,
+            onClearLogs = onClearDiagnosticLogs
         )
     }
 }

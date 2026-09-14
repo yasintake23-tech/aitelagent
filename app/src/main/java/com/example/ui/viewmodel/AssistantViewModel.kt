@@ -18,6 +18,7 @@ import com.example.ai.ProviderValidationResult
 import com.example.service.VoiceAssistantManager
 import com.example.data.local.AssistantDatabase
 import com.example.data.security.CredentialStore
+import com.example.data.security.AgentLogStore
 import com.example.data.local.MemoryFileManager
 import com.example.data.model.ChatMessageEntity
 import com.example.data.model.MemoryCategory
@@ -88,6 +89,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _orbState = MutableStateFlow(OrbState.IDLE)
     private val _selectedModel = MutableStateFlow("")
     private val _error = MutableStateFlow<String?>(null)
+    private val _diagnosticLogs = MutableStateFlow<List<AgentLogStore.Entry>>(emptyList())
     val error = _error.asStateFlow()
 
     private var voiceManager: VoiceAssistantManager? = null
@@ -95,6 +97,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val availableProviders: List<AIProvider> = aiProviderManager.getAvailableProviders()
 
     init {
+        _diagnosticLogs.value = AgentLogStore.read(getApplication())
         initVoiceManager()
         checkAccessibilityStatus()
         syncExternalDownloadsMemoryOnStartup()
@@ -261,6 +264,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         _orbState,
         _selectedModel,
         _error,
+        _diagnosticLogs,
         AiDeviceAccessibilityService.liveScreenSnapshot,
         AiDeviceAccessibilityService.liveScreenshotBitmap,
         AiDeviceAccessibilityService.virtualFingerState,
@@ -281,11 +285,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val orbState = params[11] as OrbState
         val selectedModelRaw = params[12] as String
         val errorMsg = params[13] as String?
-        val liveSnapshot = params[14] as ScreenSnapshot
-        val liveScreenshot = params[15] as Bitmap?
-        val virtualFinger = params[16] as VirtualFingerState?
-        val agentState = params[17] as AgentState
-        val agentTaskSession = params[18] as AgentTaskSession?
+        val diagnosticLogs = params[14] as List<AgentLogStore.Entry>
+        val liveSnapshot = params[15] as ScreenSnapshot
+        val liveScreenshot = params[16] as Bitmap?
+        val virtualFinger = params[17] as VirtualFingerState?
+        val agentState = params[18] as AgentState
+        val agentTaskSession = params[19] as AgentTaskSession?
 
         val activeProvider = profile?.preferredAiProvider ?: "gemini"
         val availableModels = aiProviderManager.getAvailableModels(activeProvider)
@@ -324,7 +329,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             liveSnapshot = liveSnapshot,
             liveScreenshot = liveScreenshot,
             virtualFingerState = virtualFinger,
-            error = errorMsg
+            error = errorMsg,
+            diagnosticLogs = diagnosticLogs
         )
     }.stateIn(
         scope = viewModelScope,
@@ -430,6 +436,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     _currentTaskName.value = command
                     _explorationStatusText.value = "Görev analiz ediliyor..."
 
+                    AgentLogStore.record(getApplication(), "INFO", "AssistantViewModel", "Agent command started: $command")
                     val execResult = DeviceAgentExecutor.executeSmartAutonomousTask(
                         context = getApplication(),
                         command = command,
@@ -441,6 +448,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
                     _isAgentControlling.value = false
                     _orbState.value = OrbState.IDLE
+                    AgentLogStore.record(getApplication(), if (execResult.isSuccess) "INFO" else "ERROR", "AssistantViewModel", "Agent command finished success=${execResult.isSuccess}: ${execResult.speechFeedback}")
+                    _diagnosticLogs.value = AgentLogStore.read(getApplication())
 
                     if (execResult.isSuccess || execResult.actionType != "DELEGATE_TO_AI_MODEL") {
                         if (execResult.speechFeedback.isNotEmpty()) {
@@ -535,6 +544,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun clearError() {
         _error.value = null
+    }
+
+    fun getDiagnosticLogs(): List<AgentLogStore.Entry> = AgentLogStore.read(getApplication())
+
+    fun loadDiagnosticLogs() {
+        _diagnosticLogs.value = AgentLogStore.read(getApplication())
+    }
+
+    fun clearDiagnosticLogs() {
+        AgentLogStore.clear(getApplication())
+        _diagnosticLogs.value = emptyList()
     }
 
     fun sendMessage(userText: String, speakResponse: Boolean = false) {

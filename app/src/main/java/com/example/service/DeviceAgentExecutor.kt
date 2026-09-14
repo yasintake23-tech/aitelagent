@@ -25,6 +25,7 @@ import com.example.agent.brain.AgentBrain
 import com.example.agent.brain.ActionProposal
 import com.example.agent.brain.AgentActionType as BrainActionType
 import com.example.data.security.CredentialStore
+import com.example.data.security.AgentLogStore
 import com.example.data.local.AssistantDatabase
 import com.example.data.model.MemoryCategory
 import com.example.data.model.MemoryEntryEntity
@@ -45,6 +46,10 @@ data class AgentExecutionResult(
 object DeviceAgentExecutor {
 
     private const val TAG = "DeviceAgentExecutor"
+
+    private fun persistLog(context: Context?, level: String, message: String) {
+        if (context != null) AgentLogStore.record(context, level, TAG, message)
+    }
 
     /**
      * Aggressively normalizes Turkish app names by removing verbs, suffixes ('a, 'e, 'ı, 'i, 'ye, 'ya, etc.) and slang.
@@ -130,236 +135,12 @@ object DeviceAgentExecutor {
         appQuery: String,
         onStepUpdate: ((String) -> Unit)? = null
     ): AgentExecutionResult = withContext(Dispatchers.Main) {
-        val service = AiDeviceAccessibilityService.instance
-        if (service == null) {
-            return@withContext AgentExecutionResult(
-                isSuccess = false,
-                actionType = "ACCESSIBILITY_UNAVAILABLE",
-                speechFeedback = "Uygulamayı ekrandan bulup açabilmek için Erişilebilirlik iznine ihtiyacım var.",
-                technicalLog = "AiDeviceAccessibilityService is not enabled"
-            )
-        }
-
-        val appName = normalizeAppQuery(appQuery)
-        onStepUpdate?.invoke("Ana ekranda $appName aranıyor...")
-
-        val opened = service.findAndOpenAppVisually(
-            appName = appName,
-            apiKey = CredentialStore(context).getApiKey("gemini"),
-            maxSwipes = 6,
-            onStatusUpdate = { status ->
-                onStepUpdate?.invoke(status)
-            }
-        )
-
-        if (opened) {
-            return@withContext AgentExecutionResult(
-                isSuccess = true,
-                actionType = "OPEN_APP_VISUAL",
-                speechFeedback = "$appName açılıyor.",
-                technicalLog = "Visually located and opened $appName via touch gesture"
-            )
-        } else {
-            return@withContext AgentExecutionResult(
-                isSuccess = false,
-                actionType = "APP_NOT_FOUND_VISUALLY",
-                speechFeedback = "Ekranda $appName görünmüyor.",
-                technicalLog = "Visual grounding could not locate $appName icon after swiping"
-            )
-        }
+        val message = "Eski görsel uygulama açma yolu devre dışı; ortak Multi-Brain yürütücüsü kullanılmalı."
+        AgentLogStore.record(context, "WARN", TAG, "$message target=$appQuery")
+        onStepUpdate?.invoke(message)
+        AgentExecutionResult(false, "LEGACY_VISUAL_OPENER_DISABLED", message, message)
     }
 
-    /**
-     * Finds on-screen UI element matching query using Visual Grounding + Action-Verification touch loop.
-     */
-    suspend fun clickElementVisually(query: String): AgentExecutionResult = withContext(Dispatchers.Main) {
-        val service = AiDeviceAccessibilityService.instance
-        if (service == null) {
-            return@withContext AgentExecutionResult(
-                isSuccess = false,
-                actionType = "ACCESSIBILITY_UNAVAILABLE",
-                speechFeedback = "Erişilebilirlik izni gerekli.",
-                technicalLog = "AiDeviceAccessibilityService instance is null"
-            )
-        }
-
-        val screenshot = service.captureLiveScreenshotAsync()
-        val snapshot = service.updateLiveSnapshot()
-
-        val grounding = VisualGroundingEngine.locateTargetOnScreen(
-            apiKey = CredentialStore(service).getApiKey("gemini"),
-            bitmap = screenshot,
-            targetDescription = query,
-            candidateNodes = snapshot.clickableNodes,
-            currentPackage = snapshot.packageName,
-            stepNumber = 1,
-            searchContext = "Ekranda '$query' butonunu veya alanını bul"
-        )
-
-        if (grounding.found && (grounding.targetNode != null || (grounding.targetX > 0 && grounding.targetY > 0))) {
-            val verified = service.clickAtWithVerification(
-                x = grounding.targetX,
-                y = grounding.targetY,
-                label = query,
-                targetNode = grounding.targetNode
-            )
-            return@withContext AgentExecutionResult(
-                isSuccess = verified,
-                actionType = "CLICK_VISUAL_VERIFIED",
-                speechFeedback = "Tıklandı.",
-                technicalLog = "Clicked visual coordinate (${grounding.targetX}, ${grounding.targetY}) with verification: $verified (hasNativeNode=${grounding.targetNode != null})",
-                clickCoordinates = PointF(grounding.targetX, grounding.targetY)
-            )
-        }
-
-        return@withContext AgentExecutionResult(
-            isSuccess = false,
-            actionType = "ELEMENT_NOT_FOUND_VISUALLY",
-            speechFeedback = "Ekranda $query göremiyorum.",
-            technicalLog = "Visual grounding found=false for '$query'"
-        )
-    }
-
-    /**
-     * Performs direct swipe or navigation gestures.
-     */
-    suspend fun performNavigation(action: String): AgentExecutionResult = withContext(Dispatchers.Main) {
-        val service = AiDeviceAccessibilityService.instance
-        val clean = action.lowercase(Locale("tr", "TR")).trim()
-
-        when {
-            clean.contains("hızlı panel") || clean.contains("hızlı ayar") || clean.contains("quick settings") || clean.contains("kontrol panel") -> {
-                val done = service?.openQuickSettings() == true
-                service?.awaitScreenSettled(800L, 200L)
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "GLOBAL_QUICK_SETTINGS",
-                    speechFeedback = "Hızlı ayarlar paneli açıldı.",
-                    technicalLog = "Executed Accessibility GLOBAL_ACTION_QUICK_SETTINGS"
-                )
-            }
-
-            clean.contains("bildirim") -> {
-                val done = service?.openNotifications() == true
-                service?.awaitScreenSettled(800L, 200L)
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "GLOBAL_NOTIFICATIONS",
-                    speechFeedback = "Bildirim paneli açıldı.",
-                    technicalLog = "Executed Accessibility GLOBAL_ACTION_NOTIFICATIONS"
-                )
-            }
-
-            clean.contains("sesi aç") || clean.contains("sesi artır") || clean.contains("sesi yükselt") || clean.contains("ses aç") || clean.contains("ses artır") || clean == "volume up" -> {
-                val done = service?.volumeUp() == true
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "VOLUME_UP",
-                    speechFeedback = "Ses seviyesi yükseltildi.",
-                    technicalLog = "Executed AudioManager volumeUp"
-                )
-            }
-
-            clean.contains("sesi kıs") || clean.contains("sesi azalt") || clean.contains("sesi düşür") || clean.contains("ses kıs") || clean.contains("ses azalt") || clean == "volume down" -> {
-                val done = service?.volumeDown() == true
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "VOLUME_DOWN",
-                    speechFeedback = "Ses seviyesi kısıldı.",
-                    technicalLog = "Executed AudioManager volumeDown"
-                )
-            }
-
-            clean.contains("ana sayfa") || clean.contains("ana ekran") || clean == "home" -> {
-                val done = service?.goHome() == true
-                service?.awaitScreenSettled(1000L, 200L)
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "GLOBAL_HOME",
-                    speechFeedback = "Ana ekrana dönüldü.",
-                    technicalLog = "Executed Accessibility GLOBAL_ACTION_HOME"
-                )
-            }
-
-            clean.contains("geri") || clean == "back" -> {
-                val done = service?.goBack() == true
-                service?.awaitScreenSettled(800L, 200L)
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "GLOBAL_BACK",
-                    speechFeedback = "Geri dönüldü.",
-                    technicalLog = "Executed Accessibility GLOBAL_ACTION_BACK"
-                )
-            }
-
-            clean.contains("son uygulamalar") || clean.contains("recents") -> {
-                val done = service?.pressRecents() == true
-                service?.awaitScreenSettled(800L, 200L)
-                return@withContext AgentExecutionResult(
-                    isSuccess = done,
-                    actionType = "GLOBAL_RECENTS",
-                    speechFeedback = "Açık uygulamalar gösterildi.",
-                    technicalLog = "Executed Accessibility GLOBAL_ACTION_RECENTS"
-                )
-            }
-
-            clean.contains("sola kaydır") || clean.contains("sonraki sayfa") -> {
-                service?.swipeLeftAsync()
-                return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
-                    actionType = "SWIPE_LEFT",
-                    speechFeedback = "Ekran sola kaydırıldı.",
-                    technicalLog = "Executed swipe left"
-                )
-            }
-
-            clean.contains("sağa kaydır") || clean.contains("önceki sayfa") -> {
-                service?.swipeRightAsync()
-                return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
-                    actionType = "SWIPE_RIGHT",
-                    speechFeedback = "Ekran sağa kaydırıldı.",
-                    technicalLog = "Executed swipe right"
-                )
-            }
-
-            clean.contains("aşağı kaydır") || clean.contains("aşağı in") || clean.contains("scroll down") -> {
-                service?.swipeDownAsync()
-                return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
-                    actionType = "SWIPE_DOWN",
-                    speechFeedback = "Sayfa aşağı kaydırıldı.",
-                    technicalLog = "Executed swipe down"
-                )
-            }
-
-            clean.contains("yukarı kaydır") || clean.contains("yukarı çık") || clean.contains("scroll up") -> {
-                service?.swipeUpAsync()
-                return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
-                    actionType = "SWIPE_UP",
-                    speechFeedback = "Sayfa yukarı kaydırıldı.",
-                    technicalLog = "Executed swipe up"
-                )
-            }
-        }
-
-        return@withContext AgentExecutionResult(
-            isSuccess = false,
-            actionType = "UNKNOWN_GESTURE",
-            speechFeedback = "Bu hareketi tanıyamadım.",
-            technicalLog = "Unrecognized gesture command: $action"
-        )
-    }
-
-    /**
-     * Pure Visual Human-Like WhatsApp Message Sending Pipeline:
-     * 1. Visually find and tap WhatsApp icon on home screen/drawer (NO Intent!).
-     * 2. Visually locate search icon/bar, tap with verification.
-     * 3. Type contact name, visually locate matching contact, tap with verification.
-     * 4. Type message into input box.
-     * 5. Visually locate send button, tap with verification.
-     */
     /**
      * Legacy WhatsApp-specific automation is intentionally removed from the runtime.
      * All device tasks must go through the shared Multi-Brain AgentBrain pipeline.
@@ -709,6 +490,11 @@ object DeviceAgentExecutor {
         maxSteps: Int = 10,
         onStatusUpdate: ((String) -> Unit)? = null
     ): AgentExecutionResult = withContext(Dispatchers.Main) {
+        if (!brain.isMultiBrainEnabled()) {
+            val message = "Multi-Brain AgentBrain etkin değil; eski tek-AI yürütme yolu kapatıldı."
+            AgentLogStore.record(context, "ERROR", TAG, message)
+            return@withContext AgentExecutionResult(false, "MULTI_BRAIN_NOT_ENABLED", message, message)
+        }
         val service = AiDeviceAccessibilityService.instance
         if (service == null) {
             val errMsg = "Otonom görevi yürütmek için Erişilebilirlik iznine ihtiyacım var."
@@ -785,14 +571,21 @@ object DeviceAgentExecutor {
 
         onStatusUpdate?.invoke("Ekran inceleniyor ve plan oluşturuluyor...")
         val initialSnapshot = service.extractLiveScreenSnapshot()
-        val plan = brain.initializeTask(
-            userPrompt = goalPrompt,
-            snapshot = initialSnapshot,
-            apiKey = apiKey,
-            providerId = activeProviderId,
-            intentType = intentType,
-            model = selectedModel
-        )
+        val plan = try {
+            brain.initializeTask(
+                userPrompt = goalPrompt,
+                snapshot = initialSnapshot,
+                apiKey = apiKey,
+                providerId = activeProviderId,
+                intentType = intentType,
+                model = selectedModel
+            )
+        } catch (e: Exception) {
+            val message = "Agent planlama başarısız: ${e.localizedMessage ?: "Bilinmeyen hata"}"
+            persistLog(context, "ERROR", message)
+            AgentLifecycleManager.failSession(taskSession.taskId, message)
+            return@withContext AgentExecutionResult(false, "AGENT_PLANNING_ERROR", message, message)
+        }
 
         val planDesc = plan.currentSubGoal?.description ?: "Görev başlatıldı."
         AgentLifecycleManager.transitionState(
@@ -839,15 +632,30 @@ object DeviceAgentExecutor {
             )
             onStatusUpdate?.invoke("Adım $currentStep: Karar veriliyor...")
 
-            val proposal = brain.proposeNextAction(
-                snapshot = beforeSnapshot,
-                screenFingerprint = screenFingerprint,
-                apiKey = apiKey,
-                providerId = activeProviderId,
-                model = selectedModel
-            )
+            val proposal = try {
+                brain.proposeNextAction(
+                    snapshot = beforeSnapshot,
+                    screenFingerprint = screenFingerprint,
+                    apiKey = apiKey,
+                    providerId = activeProviderId,
+                    model = selectedModel
+                )
+            } catch (e: Exception) {
+                val message = "Multi-Brain karar turu başarısız: ${e.localizedMessage ?: "Bilinmeyen hata"}"
+                persistLog(context, "ERROR", message)
+                onStatusUpdate?.invoke(message)
+                brain.workingMemory.recordFailure(currentStep, "MULTI_BRAIN", message)
+                if (brain.workingMemory.state.consecutiveFailures >= 2) {
+                    AgentLifecycleManager.failSession(taskSession.taskId, message)
+                    finalSummary = message
+                    break
+                }
+                currentStep++
+                continue
+            }
 
             Log.i(TAG, "Brain Proposal: type=${proposal.actionType}, target=${proposal.target}, reason=${proposal.reason}")
+            persistLog(context, "INFO", "Proposal type=${proposal.actionType}; target=${proposal.target}; reason=${proposal.reason}")
 
             if (proposal.actionType == BrainActionType.COMPLETE) {
                 val isVerified = brain.verifyTaskCompletion(beforeSnapshot)
@@ -883,10 +691,10 @@ object DeviceAgentExecutor {
             // 3. SAFETY GUARDIAN GATE
             val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in beforeSnapshot.clickableNodes.indices) {
                 beforeSnapshot.clickableNodes[proposal.targetIndex]
-            } else if (proposal.target != null) {
+            } else if (!proposal.target.isNullOrBlank()) {
                 beforeSnapshot.clickableNodes.find { node ->
                     val txt = node.text.ifBlank { node.contentDescription }
-                    txt.contains(proposal.target, ignoreCase = true)
+                    txt.isNotBlank() && txt.contains(proposal.target, ignoreCase = true)
                 }
             } else null
 
@@ -911,6 +719,7 @@ object DeviceAgentExecutor {
             if (!safetyDecision.allowed) {
                 val blockedMsg = "Güvenlik Engeli: ${safetyDecision.reason}"
                 Log.w(TAG, "SafetyGuardian eylemi engelledi: $blockedMsg")
+                persistLog(context, "WARN", blockedMsg)
                 AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, blockedMsg)
                 onStatusUpdate?.invoke(blockedMsg)
 
@@ -944,6 +753,7 @@ object DeviceAgentExecutor {
             val verification = brain.verifyAndRecordResult(proposal, beforeSnapshot, afterSnapshot)
 
             Log.i(TAG, "Verification: isVerified=${verification.isVerified}, reason=${verification.reason}")
+            persistLog(context, if (verification.isVerified) "INFO" else "WARN", "Verification=${verification.isVerified}; ${verification.reason}")
 
             if (!verification.isVerified && brain.workingMemory.state.consecutiveFailures >= 3) {
                 Log.w(TAG, "3 üst üste başarısız eylem. REPLAN tetikleniyor.")
@@ -987,9 +797,10 @@ object DeviceAgentExecutor {
                     val cx = targetNode.bounds.centerX().toFloat()
                     val cy = targetNode.bounds.centerY().toFloat()
                     service.clickAtWithVerificationResult(cx, cy, label = proposal.target ?: "düğme", targetNode = targetNode)
-                } else if (proposal.target != null) {
+                } else if (!proposal.target.isNullOrBlank()) {
                     val matched = snapshot.clickableNodes.find {
-                        it.text.contains(proposal.target, ignoreCase = true) || it.contentDescription.contains(proposal.target, ignoreCase = true)
+                        val label = it.text.ifBlank { it.contentDescription }
+                        label.isNotBlank() && label.contains(proposal.target, ignoreCase = true)
                     }
                     if (matched != null) {
                         service.clickAtWithVerificationResult(
@@ -1001,9 +812,21 @@ object DeviceAgentExecutor {
                     }
                 }
             }
+            BrainActionType.CLICK_COORD -> {
+                val x = proposal.x
+                val y = proposal.y
+                if (x != null && y != null) {
+                    service.clickAtWithVerificationResult(
+                        x = x.toFloat(),
+                        y = y.toFloat(),
+                        label = proposal.target ?: "Vision adayı",
+                        targetNode = targetNode
+                    )
+                }
+            }
             BrainActionType.TYPE_TEXT -> {
                 if (!proposal.textPayload.isNullOrBlank()) {
-                    service.typeTextIntoNode(proposal.textPayload)
+                    service.typeTextIntoNode(proposal.textPayload, proposal.target.orEmpty())
                 }
             }
             BrainActionType.PRESS_BACK -> {
@@ -1012,8 +835,17 @@ object DeviceAgentExecutor {
             BrainActionType.PRESS_HOME -> {
                 service.goHome()
             }
-            BrainActionType.SWIPE -> {
+            BrainActionType.SWIPE_DOWN -> {
                 service.swipeDownAsync()
+            }
+            BrainActionType.SWIPE_UP -> {
+                service.swipeUpAsync()
+            }
+            BrainActionType.SWIPE_LEFT -> {
+                service.swipeLeftAsync()
+            }
+            BrainActionType.SWIPE_RIGHT -> {
+                service.swipeRightAsync()
             }
             BrainActionType.OPEN_APP -> {
                 // Multi-Brain physical execution must stay grounded in the current
@@ -1026,8 +858,16 @@ object DeviceAgentExecutor {
                         label = proposal.target ?: "uygulama",
                         targetNode = targetNode
                     )
+                } else if (proposal.x != null && proposal.y != null) {
+                    service.clickAtWithVerificationResult(
+                        proposal.x.toFloat(),
+                        proposal.y.toFloat(),
+                        label = proposal.target ?: "Vision uygulama adayı",
+                        targetNode = null
+                    )
                 } else {
                     Log.w("DeviceAgentExecutor", "Rejected ungrounded OPEN_APP proposal: ${proposal.target}")
+                    persistLog(context, "WARN", "OPEN_APP without grounded target rejected: ${proposal.target}")
                 }
             }
             else -> {
@@ -1098,6 +938,7 @@ object DeviceAgentExecutor {
         }
 
         // 2. PRIMARY: Execute via AgentBrain Orchestrator
+        persistLog(context, "INFO", "Autonomous task started: $command")
         val brainResult = executeAgentBrainAutonomousLoop(
             context = context,
             goalPrompt = command,
@@ -1110,6 +951,7 @@ object DeviceAgentExecutor {
             return@withContext brainResult
         }
 
+        persistLog(context, if (brainResult.isSuccess) "INFO" else "ERROR", "Autonomous task finished: success=${brainResult.isSuccess}; ${brainResult.speechFeedback}")
         return@withContext brainResult
     }
 

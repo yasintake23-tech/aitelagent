@@ -33,6 +33,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.PersonalityTone
+import com.example.data.security.AgentLogStore
 import com.example.data.model.UserProfileEntity
 import com.example.ui.theme.GentleRose
 import com.example.ui.theme.ObsidianBlack
@@ -96,13 +98,17 @@ fun SettingsSheet(
     onUpdateUserName: (String) -> Unit,
     onUpdateApiKey: (String) -> Unit,
     onReplayAwakening: () -> Unit,
-    onClearChatHistory: () -> Unit
+    onClearChatHistory: () -> Unit,
+    diagnosticLogs: List<AgentLogStore.Entry> = emptyList(),
+    onOpenLogs: () -> Unit = {},
+    onClearLogs: () -> Unit = {}
 ) {
     val currentTone = PersonalityTone.fromString(profile?.personalityTone)
     var editAiName by remember(profile?.aiName) { mutableStateOf(profile?.aiName ?: "Nova") }
     var editUserName by remember(profile?.userName) { mutableStateOf(profile?.userName ?: "") }
     var editApiKey by remember(selectedProviderId, activeProviderApiKey) { mutableStateOf(activeProviderApiKey) }
     var isModelDropdownExpanded by remember { mutableStateOf(false) }
+    var showLogs by remember { mutableStateOf(false) }
 
     val providers = remember {
         listOf(
@@ -545,6 +551,28 @@ fun SettingsSheet(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // Diagnostic Logs
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = {
+                    onOpenLogs()
+                    showLogs = true
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = SubtleGrayBg),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Geçmiş Loglar (${diagnosticLogs.size})", color = TextPrimary, fontSize = 12.sp)
+            }
+            Text(
+                "Agent, Multi-Brain, Vision, Safety ve hata kayıtları burada tutulur.",
+                color = TextMuted,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+
             // Reset / Replay Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -573,6 +601,40 @@ fun SettingsSheet(
 
             Spacer(modifier = Modifier.height(30.dp))
         }
+    }
+
+    if (showLogs) {
+        AlertDialog(
+            onDismissRequest = { showLogs = false },
+            title = { Text("Geçmiş Agent Logları", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (diagnosticLogs.isEmpty()) {
+                        Text("Henüz kayıtlı log yok.", color = TextSecondary, fontSize = 12.sp)
+                    } else {
+                        diagnosticLogs.take(200).forEach { entry ->
+                            Text(
+                                "${AgentLogStore.formatTimestamp(entry.timestamp)}  [${entry.level}] ${entry.tag}",
+                                color = TextPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(entry.message, color = TextSecondary, fontSize = 10.sp, modifier = Modifier.padding(bottom = 8.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { onClearLogs(); showLogs = false }) { Text("Temizle") }
+            },
+            dismissButton = {
+                Button(onClick = { showLogs = false }) { Text("Kapat") }
+            }
+        )
     }
 }
 
