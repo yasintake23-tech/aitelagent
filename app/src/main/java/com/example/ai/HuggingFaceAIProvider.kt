@@ -33,11 +33,17 @@ class HuggingFaceAIProvider(
     override val keyHint: String = "Hugging Face Kullanıcı Erişim Token'ı (Access Token)"
     override val freeTierInfo: String = "Ücretsiz hesapla sunucusuz Inference API erişimi."
     override val isCloudBased: Boolean = true
-    override val defaultModel: String = "mistralai/Mistral-7B-Instruct-v0.3"
+    override val defaultModel: String = "Qwen/Qwen2.5-7B-Instruct"
     override val availableModels: List<String> = listOf(
         "mistralai/Mistral-7B-Instruct-v0.3",
         "Qwen/Qwen2.5-7B-Instruct",
         "microsoft/Phi-3-mini-4k-instruct"
+    )
+
+    val defaultVisionModel: String = "Qwen/Qwen2.5-VL-3B-Instruct"
+    val availableVisionModels: List<String> = listOf(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "Qwen/Qwen2.5-VL-7B-Instruct"
     )
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -156,4 +162,104 @@ class HuggingFaceAIProvider(
             localFallback.generateResponse(prompt, conversationHistory, memories, profile).collect { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
+
+    override suspend fun generateStructuralContent(
+        systemPrompt: String,
+        userPrompt: String,
+        apiKey: String,
+        model: String
+    ): String = withContext(Dispatchers.IO) {
+        // ... (existing implementation or similar to text)
+        // For simplicity, reusing text generation logic if structural content is requested
+        val modelId = if (model.isNotBlank()) model else defaultModel
+        val url = "https://api-inference.huggingface.co/models/$modelId"
+        
+        val jsonBody = JSONObject()
+        jsonBody.put("inputs", "$systemPrompt\n\n$userPrompt")
+        
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${apiKey.trim()}")
+            .post(jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val response = okHttpClient.newCall(request).execute()
+        if (!response.isSuccessful) throw RuntimeException("HF Error: ${response.code}")
+        
+        val respStr = response.body?.string() ?: ""
+        try {
+            val arr = JSONArray(respStr)
+            arr.getJSONObject(0).optString("generated_text", "")
+        } catch (e: Exception) {
+            JSONObject(respStr).optString("generated_text", "")
+        }
+    }
+
+    override suspend fun generateVisionContent(
+        prompt: String,
+        bitmap: android.graphics.Bitmap,
+        apiKey: String,
+        model: String
+    ): String = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) throw IllegalArgumentException("HF_API_KEY_MISSING")
+        val modelId = model.takeIf { availableVisionModels.contains(it) } ?: defaultVisionModel
+        val dataUrl = "data:image/jpeg;base64,${encodeBitmapToBase64(bitmap)}"
+
+        val content = JSONArray().apply {
+            put(JSONObject().apply {
+                put("type", "text")
+                put("text", prompt)
+            })
+            put(JSONObject().apply {
+                put("type", "image_url")
+                put("image_url", JSONObject().apply { put("url", dataUrl) })
+            })
+        }
+        val messages = JSONArray().apply {
+            put(JSONObject().apply {
+                put("role", "user")
+                put("content", content)
+            })
+        }
+        val jsonBody = JSONObject().apply {
+            put("model", modelId)
+            put("messages", messages)
+            put("temperature", 0.1)
+            put("max_tokens", 400)
+        }
+
+        val request = Request.Builder()
+            .url("https://router.huggingface.co/v1/chat/completions")
+            .header("Authorization", "Bearer ${apiKey.trim()}")
+            .post(jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        val response = okHttpClient.newCall(request).execute()
+        val body = response.body?.string().orEmpty()
+        if (!response.isSuccessful) {
+            Log.e("HuggingFaceAIProvider", "Vision error ${response.code}: $body")
+            throw RuntimeException("HF Vision Error: HTTP ${response.code}")
+        }
+        val json = JSONObject(body)
+        val choices = json.optJSONArray("choices") ?: throw RuntimeException("HF Vision returned no choices")
+        val message = choices.optJSONObject(0)?.optJSONObject("message")
+        val contentValue = message?.opt("content")
+        when (contentValue) {
+            is String -> contentValue.trim()
+            is JSONArray -> buildString {
+                for (i in 0 until contentValue.length()) {
+                    val part = contentValue.optJSONObject(i)
+                    append(part?.optString("text").orEmpty())
+                }
+            }.trim()
+            else -> ""
+        }.ifBlank { throw RuntimeException("HF Vision returned empty content") }
+    }
+
+    private fun encodeBitmapToBase64(bitmap: android.graphics.Bitmap): String {
+        val outputStream = java.io.ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, outputStream)
+        val byteArray = outputStream.toByteArray()
+        return android.util.Base64.encodeToString(byteArray, android.util.Base64.NO_WRAP)
+    }
 }

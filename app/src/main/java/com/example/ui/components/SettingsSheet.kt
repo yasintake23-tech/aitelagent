@@ -81,6 +81,7 @@ fun SettingsSheet(
     profile: UserProfileEntity?,
     selectedProviderId: String = profile?.preferredAiProvider ?: "gemini",
     selectedModel: String = "",
+    activeProviderApiKey: String = "",
     availableModels: List<String> = emptyList(),
     onDismiss: () -> Unit,
     onUpdateProvider: (String) -> Unit = {},
@@ -95,7 +96,7 @@ fun SettingsSheet(
     val currentTone = PersonalityTone.fromString(profile?.personalityTone)
     var editAiName by remember(profile?.aiName) { mutableStateOf(profile?.aiName ?: "Nova") }
     var editUserName by remember(profile?.userName) { mutableStateOf(profile?.userName ?: "") }
-    var editApiKey by remember(profile?.customApiKey) { mutableStateOf(profile?.customApiKey ?: "") }
+    var editApiKey by remember(selectedProviderId, activeProviderApiKey) { mutableStateOf(activeProviderApiKey) }
     var isModelDropdownExpanded by remember { mutableStateOf(false) }
 
     val providers = remember {

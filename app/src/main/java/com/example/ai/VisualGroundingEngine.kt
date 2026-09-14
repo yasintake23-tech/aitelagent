@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.graphics.PointF
 import android.util.Base64
 import android.util.Log
-import com.example.BuildConfig
 import com.example.service.ScreenNodeData
 import com.example.service.ScreenSnapshot
 import kotlinx.coroutines.Dispatchers
@@ -109,37 +108,24 @@ object VisualGroundingEngine {
         stepNumber: Int = 1,
         searchContext: String = ""
     ): VisualGroundingResult = withContext(Dispatchers.IO) {
-        val cleanApiKey = apiKey.ifBlank {
-            BuildConfig.GEMINI_API_KEY.takeIf { it.isNotBlank() && it != "MY_GEMINI_API_KEY" } ?: ""
+        if (apiKey.isBlank() || bitmap == null) {
+            return@withContext VisualGroundingResult(found = false, action = GroundingAction.NOT_FOUND, thought = "Görsel sağlayıcı anahtarı veya ekran görüntüsü eksik.")
         }
 
-        // 1. Try Gemini Vision API if key and bitmap exist
-        if (cleanApiKey.isNotBlank() && bitmap != null) {
-            try {
-                val visionResult = queryGeminiVisionGrounding(
-                    apiKey = cleanApiKey,
-                    bitmap = bitmap,
-                    targetDescription = targetDescription,
-                    candidateNodes = candidateNodes,
-                    currentPackage = currentPackage,
-                    stepNumber = stepNumber,
-                    searchContext = searchContext
-                )
-                if (visionResult != null) {
-                    return@withContext visionResult
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Gemini Vision grounding API failed, falling back to heuristic vision scanner", e)
-            }
+        return@withContext try {
+            queryGeminiVisionGrounding(
+                apiKey = apiKey,
+                bitmap = bitmap,
+                targetDescription = targetDescription,
+                candidateNodes = candidateNodes,
+                currentPackage = currentPackage,
+                stepNumber = stepNumber,
+                searchContext = searchContext
+            ) ?: VisualGroundingResult(found = false, action = GroundingAction.NOT_FOUND, thought = "Görsel hedef doğrulanamadı.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini Vision grounding failed", e)
+            VisualGroundingResult(found = false, action = GroundingAction.NOT_FOUND, thought = "Görsel sağlayıcı hatası.")
         }
-
-        // 2. Fallback: Heuristic node matching and spatial layout reasoning
-        return@withContext heuristicScreenLocate(
-            targetDescription = targetDescription,
-            candidateNodes = candidateNodes,
-            bitmap = bitmap,
-            stepNumber = stepNumber
-        )
     }
 
     private fun queryGeminiVisionGrounding(

@@ -6,6 +6,8 @@ import com.example.agent.core.UserIntent
 import com.example.service.AiDeviceAccessibilityService
 import com.example.service.ScreenNodeData
 import com.example.service.ScreenSnapshot
+import com.example.agent.multibrain.MultiBrainOrchestrator
+import com.example.agent.multibrain.ScreenContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -30,6 +32,18 @@ class AgentBrain(
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
 ) {
+
+    // Multi-Brain Bridge
+    private var orchestrator: MultiBrainOrchestrator? = null
+    private var isMultiBrainEnabled: Boolean = false
+
+    fun enableMultiBrain(orchestrator: MultiBrainOrchestrator) {
+        this.orchestrator = orchestrator
+        this.isMultiBrainEnabled = true
+        Log.i(TAG, "Multi-Brain Mode Enabled")
+    }
+
+    fun isMultiBrainEnabled(): Boolean = isMultiBrainEnabled
 
     companion object {
         private const val TAG = "AgentBrain"
@@ -94,7 +108,7 @@ class AgentBrain(
         providerId: String = "groq",
         model: String? = null
     ): AgentPlan {
-        val taskSpec = currentTaskSpec ?: TaskSpec(workingMemory.state.originalGoal)
+        val taskSpec = currentTaskSpec ?: TaskSpec(originalGoal = workingMemory.state.originalGoal)
         Log.w(TAG, "Yeniden planlama (REPLAN) tetiklendi. Goal: '${taskSpec.originalGoal}'")
 
         val newPlan = planner.createPlan(
@@ -179,6 +193,38 @@ class AgentBrain(
                 actionType = AgentActionType.REPLAN,
                 reason = "Sonsuz döngü tespit edildi. Başka bir uygulama veya menü için alternatif plan yapılıyor."
             )
+        }
+
+        // Multi-Brain Orchestration Path
+        if (isMultiBrainEnabled) {
+            val orch = orchestrator ?: return@withContext ActionProposal(
+                actionType = AgentActionType.NO_ACTION,
+                reason = "MULTI_BRAIN_ERROR: Orchestrator not initialized."
+            )
+
+            Log.d(TAG, "Multi-Brain Orchestrator is active. Coordinating...")
+
+            val screenContext = ScreenContext(
+                snapshot = snapshot,
+                screenshot = AiDeviceAccessibilityService.liveScreenshotBitmap.value,
+                packageName = snapshot.packageName,
+                activityName = snapshot.activityName
+            )
+
+            val currentTaskId = currentTaskSpec?.taskId ?: "SESSION_${System.currentTimeMillis()}"
+            val response = orch.coordinate(currentSubGoal, screenContext, currentTaskId)
+
+            if (response.messageType == com.example.agent.multibrain.AgentMessageType.ERROR) {
+                Log.e(TAG, "Multi-Brain Coordination Failed: ${response.decisionSummary}")
+                return@withContext ActionProposal(
+                    actionType = AgentActionType.REPLAN,
+                    reason = "MULTI_BRAIN_ERROR: ${response.decisionSummary}"
+                )
+            }
+
+            val proposal = response.proposedAction ?: ActionProposal(AgentActionType.NO_ACTION, reason = "No action proposed by council")
+            Log.i(TAG, "Multi-Brain Decision: ${proposal.actionType} - ${proposal.reason}")
+            return@withContext proposal
         }
 
         try {

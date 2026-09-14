@@ -20,6 +20,7 @@ enum class SafetyLevel {
  * Kullanıcı hedefini yapılandırılmış görev bileşenlerine dönüştüren veri modeli.
  */
 data class TaskSpec(
+    val taskId: String = "TASK_${System.currentTimeMillis()}",
     val originalGoal: String,
     val intentType: UserIntent = UserIntent.DEVICE_TASK,
     val targetApp: String? = null,

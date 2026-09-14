@@ -38,13 +38,21 @@ class AIProviderManager(
             if (provider.availableModels.isNotEmpty() && !provider.availableModels.contains(savedModel)) {
                 credentialStore.saveSelectedModel(provider.id, provider.defaultModel)
             }
+            if (provider.id == "huggingface") {
+                val hf = provider as HuggingFaceAIProvider
+                val savedVision = credentialStore.getSelectedVisionModel(provider.id, hf.defaultVisionModel)
+                if (!hf.availableVisionModels.contains(savedVision)) {
+                    credentialStore.saveSelectedVisionModel(provider.id, hf.defaultVisionModel)
+                }
+            }
         }
     }
 
     fun getAvailableProviders(): List<AIProvider> = providerList
 
     fun getProvider(id: String): AIProvider {
-        return providersMap[id.lowercase(Locale.ROOT)] ?: geminiProvider
+        return providersMap[id.lowercase(Locale.ROOT)]
+            ?: throw IllegalArgumentException("Unknown AI provider: $id")
     }
 
     suspend fun validateProviderCredentials(providerId: String, apiKey: String): ProviderValidationResult {
@@ -65,10 +73,8 @@ class AIProviderManager(
         val preferredKey = profile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini"
         val activeProvider = providersMap[preferredKey] ?: geminiProvider
 
-        // Retrieve API key securely from CredentialStore (or fallback to profile legacy key if set)
-        val secureKey = credentialStore.getApiKey(activeProvider.id).ifBlank {
-            profile?.customApiKey ?: ""
-        }
+        // Provider keys are strictly isolated. No cross-provider legacy key fallback.
+        val secureKey = credentialStore.getApiKey(activeProvider.id)
 
         // Retrieve selected model (or default model for provider), validating against availableModels
         val rawSelectedModel = credentialStore.getSelectedModel(activeProvider.id, activeProvider.defaultModel)
@@ -130,6 +136,47 @@ class AIProviderManager(
         } catch (e: Exception) {
             onError?.invoke("Exception: ${e.message}")
             throw e
+        }
+    }
+
+    suspend fun generateVisionContent(
+        providerId: String,
+        prompt: String,
+        bitmap: android.graphics.Bitmap,
+        onError: ((String) -> Unit)? = null
+    ): String {
+        val provider = getProvider(providerId)
+        val apiKey = credentialStore.getApiKey(provider.id)
+        if (apiKey.isBlank()) {
+            onError?.invoke("API_KEY_MISSING")
+            throw IllegalArgumentException("API_KEY_MISSING")
+        }
+        val model = if (provider.id == "huggingface") getSelectedVisionModel("huggingface") else getSelectedModel(provider.id)
+        return try {
+            provider.generateVisionContent(prompt, bitmap, apiKey, model)
+        } catch (e: Exception) {
+            onError?.invoke("Vision Exception: ${e.message}")
+            throw e
+        }
+    }
+
+    fun getAvailableVisionModels(providerId: String): List<String> {
+        return if (providerId.lowercase(Locale.ROOT) == "huggingface") {
+            (getProvider(providerId) as? HuggingFaceAIProvider)?.availableVisionModels.orEmpty()
+        } else emptyList()
+    }
+
+    fun getSelectedVisionModel(providerId: String): String {
+        val provider = getProvider(providerId)
+        if (provider.id != "huggingface") return getSelectedModel(providerId)
+        val hf = provider as HuggingFaceAIProvider
+        val saved = credentialStore.getSelectedVisionModel(provider.id, hf.defaultVisionModel)
+        return if (hf.availableVisionModels.contains(saved)) saved else hf.defaultVisionModel
+    }
+
+    fun setSelectedVisionModel(providerId: String, model: String) {
+        if (providerId.lowercase(Locale.ROOT) == "huggingface") {
+            credentialStore.saveSelectedVisionModel(providerId, model)
         }
     }
 

@@ -7,7 +7,6 @@ import android.graphics.PointF
 import android.os.BatteryManager
 import android.os.Build
 import android.util.Log
-import com.example.BuildConfig
 import com.example.agent.core.ActionVerifier
 import com.example.agent.core.AgentLifecycleManager
 import com.example.agent.core.AgentState
@@ -146,7 +145,7 @@ object DeviceAgentExecutor {
 
         val opened = service.findAndOpenAppVisually(
             appName = appName,
-            apiKey = BuildConfig.GEMINI_API_KEY,
+            apiKey = CredentialStore(context).getApiKey("gemini"),
             maxSwipes = 6,
             onStatusUpdate = { status ->
                 onStepUpdate?.invoke(status)
@@ -188,7 +187,7 @@ object DeviceAgentExecutor {
         val snapshot = service.updateLiveSnapshot()
 
         val grounding = VisualGroundingEngine.locateTargetOnScreen(
-            apiKey = BuildConfig.GEMINI_API_KEY,
+            apiKey = CredentialStore(context).getApiKey("gemini"),
             bitmap = screenshot,
             targetDescription = query,
             candidateNodes = snapshot.clickableNodes,
@@ -230,10 +229,10 @@ object DeviceAgentExecutor {
 
         when {
             clean.contains("hızlı panel") || clean.contains("hızlı ayar") || clean.contains("quick settings") || clean.contains("kontrol panel") -> {
-                service?.openQuickSettings()
+                val done = service?.openQuickSettings() == true
                 service?.awaitScreenSettled(800L, 200L)
                 return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
+                    isSuccess = done,
                     actionType = "GLOBAL_QUICK_SETTINGS",
                     speechFeedback = "Hızlı ayarlar paneli açıldı.",
                     technicalLog = "Executed Accessibility GLOBAL_ACTION_QUICK_SETTINGS"
@@ -241,10 +240,10 @@ object DeviceAgentExecutor {
             }
 
             clean.contains("bildirim") -> {
-                service?.openNotifications()
+                val done = service?.openNotifications() == true
                 service?.awaitScreenSettled(800L, 200L)
                 return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
+                    isSuccess = done,
                     actionType = "GLOBAL_NOTIFICATIONS",
                     speechFeedback = "Bildirim paneli açıldı.",
                     technicalLog = "Executed Accessibility GLOBAL_ACTION_NOTIFICATIONS"
@@ -272,10 +271,10 @@ object DeviceAgentExecutor {
             }
 
             clean.contains("ana sayfa") || clean.contains("ana ekran") || clean == "home" -> {
-                service?.goHome()
+                val done = service?.goHome() == true
                 service?.awaitScreenSettled(1000L, 200L)
                 return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
+                    isSuccess = done,
                     actionType = "GLOBAL_HOME",
                     speechFeedback = "Ana ekrana dönüldü.",
                     technicalLog = "Executed Accessibility GLOBAL_ACTION_HOME"
@@ -283,10 +282,10 @@ object DeviceAgentExecutor {
             }
 
             clean.contains("geri") || clean == "back" -> {
-                service?.goBack()
+                val done = service?.goBack() == true
                 service?.awaitScreenSettled(800L, 200L)
                 return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
+                    isSuccess = done,
                     actionType = "GLOBAL_BACK",
                     speechFeedback = "Geri dönüldü.",
                     technicalLog = "Executed Accessibility GLOBAL_ACTION_BACK"
@@ -294,10 +293,10 @@ object DeviceAgentExecutor {
             }
 
             clean.contains("son uygulamalar") || clean.contains("recents") -> {
-                service?.pressRecents()
+                val done = service?.pressRecents() == true
                 service?.awaitScreenSettled(800L, 200L)
                 return@withContext AgentExecutionResult(
-                    isSuccess = service != null,
+                    isSuccess = done,
                     actionType = "GLOBAL_RECENTS",
                     speechFeedback = "Açık uygulamalar gösterildi.",
                     technicalLog = "Executed Accessibility GLOBAL_ACTION_RECENTS"
@@ -361,248 +360,26 @@ object DeviceAgentExecutor {
      * 4. Type message into input box.
      * 5. Visually locate send button, tap with verification.
      */
+    /**
+     * Legacy WhatsApp-specific automation is intentionally removed from the runtime.
+     * All device tasks must go through the shared Multi-Brain AgentBrain pipeline.
+     */
+    @Deprecated("Use executeSmartAutonomousTask with the Multi-Brain AgentBrain")
     suspend fun executeWhatsAppMessageWorkflow(
         context: Context,
         contactName: String,
         message: String,
         onStepUpdate: ((String) -> Unit)? = null
     ): AgentExecutionResult = withContext(Dispatchers.Main) {
-        val service = AiDeviceAccessibilityService.instance
-        if (service == null) {
-            return@withContext AgentExecutionResult(
-                isSuccess = false,
-                actionType = "ACCESSIBILITY_UNAVAILABLE",
-                speechFeedback = "WhatsApp üzerinden otomatik mesaj göndermek için Erişilebilirlik iznine ihtiyacım var.",
-                technicalLog = "AiDeviceAccessibilityService is not enabled"
-            )
-        }
-
-        val budget = TaskBudget(
-            maxSteps = 6,
-            maxRetriesPerStep = 2,
-            overallTimeoutMs = 120_000L
-        )
-
-        val taskSession = AgentLifecycleManager.startSession(
-            taskGoal = "WhatsApp: $contactName kişisine mesaj gönder",
-            budget = budget,
-            initialState = AgentState.PLANNING
-        )
-
-        fun checkCancelled(): Boolean {
-            val active = AgentLifecycleManager.currentSession.value
-            return active == null || active.taskId != taskSession.taskId || active.isCancelled || active.isFinished
-        }
-
-        // Step 1: Open WhatsApp Purely Visually (No Intent)
-        if (checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 1")
-        }
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 1, "Ana ekranda WhatsApp aranıyor...")
-        onStepUpdate?.invoke("Ana ekrandan WhatsApp simgesi görsel olarak aranıyor...")
-
-        val step1ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 1, "WhatsApp başlatılıyor...")
-        if (!step1ActingOk || checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before WhatsApp launch action")
-        }
-
-        val appOpened = service.findAndOpenAppVisually("WhatsApp", BuildConfig.GEMINI_API_KEY, 6) { status ->
-            onStepUpdate?.invoke(status)
-        }
-
-        if (!appOpened || checkCancelled()) {
-            val msg = if (checkCancelled()) "İşlem iptal edildi." else "Ana ekranda WhatsApp simgesi bulunamadı."
-            if (checkCancelled()) AgentLifecycleManager.cancelCurrentSession(msg) else AgentLifecycleManager.failSession(taskSession.taskId, msg)
-            return@withContext AgentExecutionResult(
-                isSuccess = false,
-                actionType = if (checkCancelled()) "CANCELLED" else "WHATSAPP_NOT_FOUND",
-                speechFeedback = msg,
-                technicalLog = "Could not visually locate WhatsApp icon or cancelled"
-            )
-        }
-
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.VERIFYING, 1, "WhatsApp ekranı kontrol ediliyor...")
-        service.awaitScreenSettled(1800L, 400L)
-
-        // Step 2: Visually locate Search icon
-        if (checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 2")
-        }
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 2, "Arama simgesi aranıyor...")
-        onStepUpdate?.invoke("WhatsApp içinde arama simgesi aranıyor...")
-        var searchScreenshot = service.captureLiveScreenshotAsync()
-        var searchSnapshot = service.updateLiveSnapshot()
-
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.PLANNING, 2, "Arama butonu konumlandırılıyor...")
-        var searchGrounding = VisualGroundingEngine.locateTargetOnScreen(
-            apiKey = BuildConfig.GEMINI_API_KEY,
-            bitmap = searchScreenshot,
-            targetDescription = "Arama simgesi büyüteç ikonu",
-            candidateNodes = searchSnapshot.clickableNodes,
-            currentPackage = searchSnapshot.packageName,
-            stepNumber = 1,
-            searchContext = "WhatsApp üst çubuğundaki arama büyüteç butonunu bul"
-        )
-
-        val step2ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 2, "Arama butonuna dokunuluyor...")
-        if (!step2ActingOk || checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before search click")
-        }
-        if (searchGrounding.found && (searchGrounding.targetNode != null || searchGrounding.targetX > 0)) {
-            service.clickAtWithVerification(searchGrounding.targetX, searchGrounding.targetY, "Arama", targetNode = searchGrounding.targetNode)
-        } else {
-            service.findAndClickMatching("ara")
-        }
-
-        service.awaitScreenSettled(1000L, 300L)
-
-        // Step 3: Type contact name
-        if (checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 3")
-        }
-        val step3ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 3, "Kişi yazılıyor: $contactName")
-        if (!step3ActingOk || checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before contact type action")
-        }
-        onStepUpdate?.invoke("Kişi yazılıyor: $contactName")
-        service.typeTextIntoNode(contactName)
-        service.awaitScreenSettled(1400L, 400L)
-
-        // Step 4: Visually locate and select contact in search results
-        if (checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 4")
-        }
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 4, "Arama sonuçları inceleniyor...")
-        onStepUpdate?.invoke("Kişi seçiliyor: $contactName")
-        val contactScreenshot = service.captureLiveScreenshotAsync()
-        val contactSnapshot = service.updateLiveSnapshot()
-
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.PLANNING, 4, "$contactName kişisi konumlandırılıyor...")
-        val contactGrounding = VisualGroundingEngine.locateTargetOnScreen(
-            apiKey = BuildConfig.GEMINI_API_KEY,
-            bitmap = contactScreenshot,
-            targetDescription = "$contactName sohbeti veya kişisi",
-            candidateNodes = contactSnapshot.clickableNodes,
-            currentPackage = contactSnapshot.packageName,
-            stepNumber = 1,
-            searchContext = "Arama sonuçlarında $contactName adlı kişiyi bul ve tıkla"
-        )
-
-        val step4ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 4, "$contactName seçiliyor...")
-        if (!step4ActingOk || checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before contact click action")
-        }
-        if (contactGrounding.found && (contactGrounding.targetNode != null || contactGrounding.targetX > 0)) {
-            service.clickAtWithVerification(contactGrounding.targetX, contactGrounding.targetY, contactName, targetNode = contactGrounding.targetNode)
-        } else {
-            val contactClicked = service.findAndClickMatching(contactName)
-            if (!contactClicked) {
-                val firstResult = contactSnapshot.clickableNodes.firstOrNull { it.bounds.centerY() in 200..1000 }
-                if (firstResult != null) {
-                    service.clickAtWithVerification(firstResult.bounds.centerX().toFloat(), firstResult.bounds.centerY().toFloat(), contactName, targetNode = firstResult)
-                }
-            }
-        }
-
-        service.awaitScreenSettled(1800L, 400L)
-
-        // Step 5: Type message into chat box
-        if (checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 5")
-        }
-        val step5ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 5, "Mesaj yazılıyor...")
-        if (!step5ActingOk || checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before message type action")
-        }
-        onStepUpdate?.invoke("Mesaj yazılıyor...")
-        val typed = service.typeTextIntoNode(message)
-        if (!typed) {
-            val msgScreenshot = service.captureLiveScreenshotAsync()
-            val msgSnapshot = service.updateLiveSnapshot()
-            val msgGrounding = VisualGroundingEngine.locateTargetOnScreen(
-                apiKey = BuildConfig.GEMINI_API_KEY,
-                bitmap = msgScreenshot,
-                targetDescription = "Mesaj yazma kutusu metin alanı",
-                candidateNodes = msgSnapshot.clickableNodes,
-                currentPackage = msgSnapshot.packageName,
-                stepNumber = 1
-            )
-            if (msgGrounding.found && (msgGrounding.targetNode != null || msgGrounding.targetX > 0)) {
-                service.clickAtWithVerification(msgGrounding.targetX, msgGrounding.targetY, "Mesaj Alanı", targetNode = msgGrounding.targetNode)
-                delay(400)
-                service.typeTextIntoNode(message)
-            }
-        }
-
-        service.awaitScreenSettled(1000L, 300L)
-
-        // Step 6: Visually locate and click Send button
-        if (checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before Step 6")
-        }
-        AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.OBSERVING, 6, "Gönder butonu kontrol ediliyor...")
-        onStepUpdate?.invoke("Gönder butonuna dokunuluyor...")
-        val sendScreenshot = service.captureLiveScreenshotAsync()
-        val sendSnapshot = service.updateLiveSnapshot()
-
-        val sendGrounding = VisualGroundingEngine.locateTargetOnScreen(
-            apiKey = BuildConfig.GEMINI_API_KEY,
-            bitmap = sendScreenshot,
-            targetDescription = "Gönder butonu yeşil ok simgesi",
-            candidateNodes = sendSnapshot.clickableNodes,
-            currentPackage = sendSnapshot.packageName,
-            stepNumber = 1,
-            searchContext = "Sohbetin sağ altındaki yeşil dairesel Gönder / Send butonunu bul"
-        )
-
-        val step6ActingOk = AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.ACTING, 6, "Gönder butonuna dokunuluyor...")
-        if (!step6ActingOk || checkCancelled()) {
-            AgentLifecycleManager.cancelCurrentSession("İşlem iptal edildi.")
-            return@withContext AgentExecutionResult(false, "CANCELLED", "İşlem iptal edildi.", "Cancelled before send click action")
-        }
-        if (sendGrounding.found && (sendGrounding.targetNode != null || sendGrounding.targetX > 0)) {
-            service.clickAtWithVerification(sendGrounding.targetX, sendGrounding.targetY, "Gönder", targetNode = sendGrounding.targetNode)
-        } else {
-            service.findAndClickMatching("gönder") || service.findAndClickMatching("send")
-        }
-
-        service.awaitScreenSettled(1000L, 300L)
-
-        val summary = "$contactName kişisine “$message” mesajı başarıyla gönderildi."
-        AgentLifecycleManager.completeSession(taskSession.taskId, summary)
-
-        return@withContext AgentExecutionResult(
-            isSuccess = true,
-            actionType = "WHATSAPP_AUTOMATION_VISUAL",
-            speechFeedback = summary,
-            technicalLog = "Pure visual human-like WhatsApp message automation completed for '$contactName'"
+        onStepUpdate?.invoke("Legacy WhatsApp akışı devre dışı; ortak Multi-Brain yürütücüsü kullanılmalı.")
+        AgentExecutionResult(
+            isSuccess = false,
+            actionType = "LEGACY_WORKFLOW_DISABLED",
+            speechFeedback = "Bu görev ortak otonom ajan akışı üzerinden yürütülmeli.",
+            technicalLog = "Legacy WhatsApp workflow is intentionally disabled."
         )
     }
 
-    /**
-     * Checks if user text requires device action, gesture, app control or screen reading.
-     * Uses IntentRouter to prevent false positives for conversational inputs like "merhaba".
-     */
-    fun isDeviceActionOrScreenIntent(text: String): Boolean {
-        val result = IntentRouter.classifyIntent(text)
-        return result.intent == UserIntent.DEVICE_TASK || result.intent == UserIntent.EXPLORATION_TASK
-    }
-
-    /**
-     * Continuous Multi-Step Autonomous ReAct Loop (Gör -> Düşün -> Aksiyon Al -> Doğrula -> Ekranı Yenile):
-     * Integrated with AgentTaskSession, TaskBudget, ActionVerifier and RecoveryStrategy.
-     */
     suspend fun executeAutonomousReActLoop(
         context: Context,
         goalPrompt: String,
@@ -928,6 +705,7 @@ object DeviceAgentExecutor {
     suspend fun executeAgentBrainAutonomousLoop(
         context: Context,
         goalPrompt: String,
+        brain: AgentBrain,
         maxSteps: Int = 10,
         onStatusUpdate: ((String) -> Unit)? = null
     ): AgentExecutionResult = withContext(Dispatchers.Main) {
@@ -951,11 +729,10 @@ object DeviceAgentExecutor {
             credentialStore
         )
 
-        val activeProviderId = profile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini"
+        val multiBrainActive = brain.isMultiBrainEnabled()
+        val activeProviderId = if (multiBrainActive) "groq" else (profile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini")
         val activeProvider = aiProviderManager.getProvider(activeProviderId)
-        val apiKey = aiProviderManager.getApiKey(activeProviderId).ifBlank {
-            profile?.customApiKey ?: ""
-        }
+        val apiKey = aiProviderManager.getApiKey(activeProviderId)
 
         if (apiKey.isBlank()) {
             val noKeyMsg = "API Anahtarı bulunamadı. Lütfen Ayarlar'dan ${activeProvider.displayName} API Key tanımlayın."
@@ -984,7 +761,6 @@ object DeviceAgentExecutor {
             initialState = AgentState.PLANNING
         )
 
-        val brain = AgentBrain(aiProviderManager = aiProviderManager)
         val intentType = IntentRouter.classifyIntent(goalPrompt).intent
 
         onStatusUpdate?.invoke("Ekran inceleniyor ve plan oluşturuluyor...")
@@ -1087,11 +863,23 @@ object DeviceAgentExecutor {
             // 3. SAFETY GUARDIAN GATE
             val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in beforeSnapshot.clickableNodes.indices) {
                 beforeSnapshot.clickableNodes[proposal.targetIndex]
-            } else {
-                beforeSnapshot.clickableNodes.firstOrNull { node ->
+            } else if (proposal.target != null) {
+                beforeSnapshot.clickableNodes.find { node ->
                     val txt = node.text.ifBlank { node.contentDescription }
-                    proposal.target != null && txt.contains(proposal.target, ignoreCase = true)
+                    txt.contains(proposal.target, ignoreCase = true)
                 }
+            } else null
+
+            // RE-CHECK: If action requires a target but none found, we MUST REPLAN
+            val requiresTarget = proposal.actionType in listOf(BrainActionType.CLICK_NODE, BrainActionType.CLICK_COORD, BrainActionType.TYPE_TEXT)
+            if (requiresTarget && targetNode == null && proposal.x == null && proposal.y == null) {
+                val failMsg = "Hedef öge bulunamadı: ${proposal.target}. Yeniden planlanıyor..."
+                Log.w(TAG, failMsg)
+                onStatusUpdate?.invoke(failMsg)
+                brain.workingMemory.recordFailure(currentStep, proposal.actionType, "Hedef öge ekranda yok.")
+                brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
+                currentStep++
+                continue
             }
 
             val safetyDecision = brain.validateActionSafety(
@@ -1180,7 +968,7 @@ object DeviceAgentExecutor {
                     val cy = targetNode.bounds.centerY().toFloat()
                     service.clickAtWithVerificationResult(cx, cy, label = proposal.target ?: "düğme", targetNode = targetNode)
                 } else if (proposal.target != null) {
-                    val matched = snapshot.clickableNodes.firstOrNull {
+                    val matched = snapshot.clickableNodes.find {
                         it.text.contains(proposal.target, ignoreCase = true) || it.contentDescription.contains(proposal.target, ignoreCase = true)
                     }
                     if (matched != null) {
@@ -1208,9 +996,18 @@ object DeviceAgentExecutor {
                 service.swipeDownAsync()
             }
             BrainActionType.OPEN_APP -> {
-                val appName = proposal.target ?: proposal.textPayload ?: ""
-                if (appName.isNotBlank()) {
-                    openAppVisually(context, appName)
+                // Multi-Brain physical execution must stay grounded in the current
+                // Accessibility tree. Never fall back to the legacy Gemini visual
+                // app-opening path from an ActionProposal.
+                if (targetNode != null) {
+                    service.clickAtWithVerificationResult(
+                        targetNode.bounds.centerX().toFloat(),
+                        targetNode.bounds.centerY().toFloat(),
+                        label = proposal.target ?: "uygulama",
+                        targetNode = targetNode
+                    )
+                } else {
+                    Log.w("DeviceAgentExecutor", "Rejected ungrounded OPEN_APP proposal: ${proposal.target}")
                 }
             }
             else -> {
@@ -1225,7 +1022,7 @@ object DeviceAgentExecutor {
     suspend fun executeSmartAutonomousTask(
         context: Context,
         command: String,
-        reasoner: AIAgentScreenReasoner? = null,
+        brain: AgentBrain,
         onStatusUpdate: ((String) -> Unit)? = null
     ): AgentExecutionResult = withContext(Dispatchers.Main) {
         val lower = command.lowercase(Locale("tr", "TR")).trim()
@@ -1284,6 +1081,7 @@ object DeviceAgentExecutor {
         val brainResult = executeAgentBrainAutonomousLoop(
             context = context,
             goalPrompt = command,
+            brain = brain,
             maxSteps = 10,
             onStatusUpdate = onStatusUpdate
         )

@@ -48,6 +48,18 @@ class CredentialStore(context: Context) {
         return prefs.getString("model_${providerId.lowercase()}", defaultModel)?.takeIf { it.isNotBlank() } ?: defaultModel
     }
 
+    fun saveSelectedVisionModel(providerId: String, model: String) {
+        if (model.isBlank()) {
+            prefs.edit().remove("vision_model_${providerId.lowercase()}").apply()
+        } else {
+            prefs.edit().putString("vision_model_${providerId.lowercase()}", model.trim()).apply()
+        }
+    }
+
+    fun getSelectedVisionModel(providerId: String, defaultModel: String = ""): String {
+        return prefs.getString("vision_model_${providerId.lowercase()}", defaultModel)?.takeIf { it.isNotBlank() } ?: defaultModel
+    }
+
     fun clearAllCredentials() {
         prefs.edit().clear().apply()
     }

@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import android.util.Base64
 import android.util.Log
-import com.example.BuildConfig
 import com.example.data.model.MemoryEntryEntity
 import com.example.data.model.UserProfileEntity
 import com.example.service.ScreenNodeData
@@ -76,13 +75,8 @@ class AIAgentScreenReasoner(
         liveScreenshot: Bitmap? = null
     ): AgentStepDecision = withContext(Dispatchers.IO) {
         val preferredProvider = profile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini"
-        val groqKey = aiProviderManager.getApiKey("groq").ifBlank {
-            if (preferredProvider == "groq") profile?.customApiKey ?: "" else ""
-        }
-        val geminiKey = aiProviderManager.getApiKey("gemini").ifBlank {
-            val keyFromStore = if (preferredProvider == "gemini") profile?.customApiKey?.ifBlank { null } else null
-            keyFromStore ?: BuildConfig.GEMINI_API_KEY.takeIf { it.isNotBlank() && it != "MY_GEMINI_API_KEY" } ?: ""
-        }
+        val groqKey = aiProviderManager.getApiKey("groq")
+        val geminiKey = aiProviderManager.getApiKey("gemini")
 
         // 1. If Groq is preferred and key is available, execute via Groq's high-speed LPU
         if (preferredProvider == "groq" && groqKey.isNotBlank()) {
@@ -723,7 +717,7 @@ class AIAgentScreenReasoner(
             val chosen = candidateNodes.find { node ->
                 val label = node.text.ifBlank { node.contentDescription }.lowercase(Locale("tr", "TR"))
                 curiosityKeywords.any { label.contains(it) }
-            } ?: candidateNodes.firstOrNull()
+            }
 
             if (chosen != null) {
                 val label = chosen.text.ifBlank { chosen.contentDescription }
@@ -763,7 +757,7 @@ class AIAgentScreenReasoner(
         val curiousNode = unvisitedNodes.find { node ->
             val label = node.text.ifBlank { node.contentDescription }.lowercase(Locale("tr", "TR"))
             curiosityKeywords.any { label.contains(it) }
-        } ?: unvisitedNodes.firstOrNull()
+        }
 
         if (curiousNode != null) {
             val label = curiousNode.text.ifBlank { curiousNode.contentDescription }

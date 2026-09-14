@@ -20,3 +20,13 @@ View your app in AI Studio: https://ai.studio/apps/0604ca9f-2b26-4e87-8caf-acbab
 5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
 6. Run the app on an emulator or physical device
 7. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.
+
+## Lumina AI - Multi-Brain Stabilization
+
+Bu sürüm, otonom cihaz ajanı için Groq Reasoning + Hugging Face Vision + Gemini Advisor council akışını tek görev kimliği altında çalıştırır. Provider anahtarları CredentialStore üzerinden provider bazında ayrılır; otonom akışta seçilmemiş sağlayıcıya gizli fallback yapılmaz.
+
+### Build
+- `./gradlew test`
+- `./gradlew assembleDebug`
+
+APK: `app/build/outputs/apk/debug/app-debug.apk`

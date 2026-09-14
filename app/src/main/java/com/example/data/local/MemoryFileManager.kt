@@ -75,7 +75,7 @@ object MemoryFileManager {
                     put("primaryExpectation", profile.primaryExpectation)
                     put("isAwakened", profile.isAwakened)
                     put("preferredAiProvider", profile.preferredAiProvider)
-                    put("customApiKey", profile.customApiKey)
+                    // API keys are secrets and must never be exported to Downloads/memory files.
                     put("updatedAt", profile.updatedAt)
                 }
                 val configFile = File(targetDir, SYSTEM_CONFIG_FILE)
@@ -148,7 +148,7 @@ object MemoryFileManager {
                 primaryExpectation = obj.optString("primaryExpectation", ""),
                 isAwakened = obj.optBoolean("isAwakened", true),
                 preferredAiProvider = obj.optString("preferredAiProvider", "gemini"),
-                customApiKey = obj.optString("customApiKey", ""),
+                // Never import API keys from files; keys belong exclusively in CredentialStore.
                 updatedAt = obj.optLong("updatedAt", System.currentTimeMillis())
             )
         } catch (e: Exception) {

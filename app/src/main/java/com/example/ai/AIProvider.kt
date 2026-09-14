@@ -40,5 +40,12 @@ interface AIProvider {
         apiKey: String,
         model: String
     ): String = ""
+
+    suspend fun generateVisionContent(
+        prompt: String,
+        bitmap: android.graphics.Bitmap,
+        apiKey: String,
+        model: String
+    ): String = ""
 }
 

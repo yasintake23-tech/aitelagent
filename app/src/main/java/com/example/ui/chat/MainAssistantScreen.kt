@@ -728,6 +728,7 @@ fun MainAssistantScreen(
             profile = uiState.profile,
             selectedProviderId = uiState.activeProviderId,
             selectedModel = uiState.selectedModel,
+            activeProviderApiKey = uiState.activeProviderApiKey,
             availableModels = uiState.availableModels,
             onDismiss = { showSettingsSheet = false },
             onUpdateProvider = onUpdateProvider,

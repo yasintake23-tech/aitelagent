@@ -5,7 +5,6 @@ import android.graphics.PointF
 import android.util.Log
 import com.example.agent.brain.AgentBrain
 import com.example.agent.brain.AgentActionType as BrainActionType
-import com.example.ai.AIAgentScreenReasoner
 import com.example.ai.AgentActionType
 import com.example.data.local.AssistantDatabase
 import com.example.data.local.MemoryFileManager
@@ -38,7 +37,7 @@ object StructuredExplorationEngine {
         service: AiDeviceAccessibilityService,
         durationMinutes: Int,
         taskPrompt: String = "Cihazı ve uygulamaları keşfet",
-        reasoner: AIAgentScreenReasoner? = null,
+        brain: AgentBrain? = null,
         profile: UserProfileEntity? = null,
         onCountdownTick: ((remainingSeconds: Int) -> Unit)? = null,
         onStatusUpdate: (String) -> Unit,
@@ -80,15 +79,15 @@ object StructuredExplorationEngine {
             com.example.data.repository.MemoryRepository(database.userProfileDao(), database.memoryDao()),
             credentialStore
         )
-        val activeProviderId = dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini"
-        val apiKey = aiProviderManager.getApiKey(activeProviderId).ifBlank {
-            dbProfile?.customApiKey ?: ""
-        }
+
+        val activeBrain = brain ?: throw IllegalArgumentException("AgentBrain must be provided for Multi-Brain exploration")
+        val multiBrainActive = activeBrain.isMultiBrainEnabled()
+        val activeProviderId = if (multiBrainActive) "groq" else (dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini")
+        val apiKey = aiProviderManager.getApiKey(activeProviderId)
         val selectedModel = aiProviderManager.getSelectedModel(activeProviderId)
 
-        val brain = AgentBrain(aiProviderManager = aiProviderManager)
         val initialSnapshot = service.extractLiveScreenSnapshot()
-        brain.initializeTask(
+        activeBrain.initializeTask(
             userPrompt = taskPrompt,
             snapshot = initialSnapshot,
             apiKey = apiKey,
@@ -155,7 +154,7 @@ object StructuredExplorationEngine {
                 session.currentState = AgentState.PLANNING
                 AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.PLANNING, session.stepCount, "Planlanıyor...")
 
-                val proposal = brain.proposeNextAction(
+                val proposal = activeBrain.proposeNextAction(
                     snapshot = snapshot,
                     screenFingerprint = currentFingerprint.value,
                     apiKey = apiKey,
@@ -187,21 +186,32 @@ object StructuredExplorationEngine {
                 if (proposal.actionType == BrainActionType.REPLAN) {
                     onStatusUpdate("Yeniden planlanıyor...")
                     AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.RECOVERING, session.stepCount, "Yeniden planlanıyor...")
-                    brain.replan(snapshot, apiKey, activeProviderId, selectedModel)
+                    activeBrain.replan(snapshot, apiKey, activeProviderId, selectedModel)
                     continue
                 }
 
                 // 4. SAFETY GUARDIAN GATE
                 val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
                     snapshot.clickableNodes[proposal.targetIndex]
-                } else {
+                } else if (proposal.target != null) {
                     snapshot.clickableNodes.firstOrNull { node ->
                         val txt = node.text.ifBlank { node.contentDescription }
-                        proposal.target != null && txt.contains(proposal.target, ignoreCase = true)
+                        txt.contains(proposal.target, ignoreCase = true)
                     }
+                } else null
+
+                // RE-CHECK: If action requires a target but none found, we MUST REPLAN
+                val requiresTarget = proposal.actionType in listOf(BrainActionType.CLICK_NODE, BrainActionType.CLICK_COORD, BrainActionType.TYPE_TEXT)
+                if (requiresTarget && targetNode == null && proposal.x == null && proposal.y == null) {
+                    val failMsg = "Hedef öge bulunamadı: ${proposal.target}. Yeniden planlanıyor..."
+                    Log.w(TAG, failMsg)
+                    onStatusUpdate(failMsg)
+                    activeBrain.workingMemory.recordFailure(session.stepCount, proposal.actionType, "Hedef öge ekranda yok.")
+                    activeBrain.replan(snapshot, apiKey, activeProviderId, selectedModel)
+                    continue
                 }
 
-                val safetyDecision = brain.validateActionSafety(
+                val safetyDecision = activeBrain.validateActionSafety(
                     proposal = proposal,
                     snapshot = snapshot,
                     node = targetNode
@@ -213,8 +223,8 @@ object StructuredExplorationEngine {
                     AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.RECOVERING, session.stepCount, blockedMsg)
                     onStatusUpdate(blockedMsg)
 
-                    brain.workingMemory.recordFailure(session.stepCount, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
-                    brain.replan(snapshot, apiKey, activeProviderId, selectedModel)
+                    activeBrain.workingMemory.recordFailure(session.stepCount, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
+                    activeBrain.replan(snapshot, apiKey, activeProviderId, selectedModel)
                     continue
                 }
 
@@ -230,7 +240,9 @@ object StructuredExplorationEngine {
                     break
                 }
 
-                val coords = if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
+                val coords = if (proposal.x != null && proposal.y != null) {
+                    PointF(proposal.x.toFloat(), proposal.y.toFloat())
+                } else if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
                     val n = snapshot.clickableNodes[proposal.targetIndex]
                     PointF(n.bounds.centerX().toFloat(), n.bounds.centerY().toFloat())
                 } else if (proposal.target != null) {
@@ -275,11 +287,16 @@ object StructuredExplorationEngine {
                         service.goHome()
                     }
                     BrainActionType.OPEN_APP -> {
-                        val appName = proposal.target ?: proposal.textPayload ?: ""
-                        if (appName.isNotBlank()) {
-                            service.findAndOpenAppVisually(appName, profile?.customApiKey ?: "", 4) { msg ->
-                                onStatusUpdate(msg)
-                            }
+                        val appTarget = proposal.target?.takeIf { it.isNotBlank() }
+                        if (targetNode != null) {
+                            service.clickAtWithVerification(
+                                targetNode.bounds.centerX().toFloat(),
+                                targetNode.bounds.centerY().toFloat(),
+                                appTarget ?: "uygulama",
+                                targetNode = targetNode
+                            )
+                        } else {
+                            onStatusUpdate("Uygulama simgesi güvenilir biçimde bulunamadı; yeniden planlanıyor...")
                         }
                     }
                     BrainActionType.OPEN_QUICK_SETTINGS -> {
@@ -308,7 +325,7 @@ object StructuredExplorationEngine {
                 val afterFingerprint = ScreenFingerprintGenerator.generateFingerprint(afterSnapshot)
                 val diffType = ScreenFingerprintGenerator.compareFingerprints(currentFingerprint, afterFingerprint)
 
-                val verification = brain.verifyAndRecordResult(proposal, snapshot, afterSnapshot)
+                val verification = activeBrain.verifyAndRecordResult(proposal, snapshot, afterSnapshot)
                 val isActionResultEffective = verification.isVerified
 
                 if (isActionResultEffective) {

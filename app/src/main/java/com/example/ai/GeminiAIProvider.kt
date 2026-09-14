@@ -1,7 +1,6 @@
 package com.example.ai
 
 import android.util.Log
-import com.example.BuildConfig
 import com.example.data.model.ChatMessageEntity
 import com.example.data.model.MemoryEntryEntity
 import com.example.data.model.MessageRole
@@ -110,8 +109,7 @@ class GeminiAIProvider(
         onError: ((String) -> Unit)?
     ): Flow<String> = flow {
         // Resolve API key
-        val apiKey = overrideApiKey?.takeIf { it.isNotBlank() }
-            ?: (try { BuildConfig.GEMINI_API_KEY } catch (e: Throwable) { "" })
+        val apiKey = overrideApiKey?.takeIf { it.isNotBlank() } ?: ""
 
         if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
             Log.d("GeminiAIProvider", "No valid Gemini API key found. Using intelligent local engine.")

@@ -34,6 +34,7 @@ data class AssistantUiState(
     val orbState: OrbState = OrbState.IDLE,
     val activeProviderId: String = "gemini",
     val selectedModel: String = "",
+    val activeProviderApiKey: String = "",
     val availableModels: List<String> = emptyList(),
     val liveSnapshot: ScreenSnapshot = ScreenSnapshot(
         packageName = "",

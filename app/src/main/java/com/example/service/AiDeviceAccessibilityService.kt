@@ -640,10 +640,22 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         if (!checkPhysicalSafety("PRESS_BACK", targetText = "Back")) return false
         return performGlobalAction(GLOBAL_ACTION_BACK)
     }
-    fun pressRecents() = performGlobalAction(GLOBAL_ACTION_RECENTS)
-    fun pressNotifications() = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-    fun openNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-    fun openQuickSettings(): Boolean = performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+    fun pressRecents(): Boolean {
+        if (!checkPhysicalSafety("PRESS_RECENTS", targetText = "Recents")) return false
+        return performGlobalAction(GLOBAL_ACTION_RECENTS)
+    }
+    fun pressNotifications(): Boolean {
+        if (!checkPhysicalSafety("OPEN_NOTIFICATIONS", targetText = "Notifications")) return false
+        return performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+    }
+    fun openNotifications(): Boolean {
+        if (!checkPhysicalSafety("OPEN_NOTIFICATIONS", targetText = "Notifications")) return false
+        return performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+    }
+    fun openQuickSettings(): Boolean {
+        if (!checkPhysicalSafety("OPEN_QUICK_SETTINGS", targetText = "Quick Settings")) return false
+        return performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+    }
     fun goHome(): Boolean {
         if (!checkPhysicalSafety("PRESS_HOME", targetText = "Home")) return false
         return performGlobalAction(GLOBAL_ACTION_HOME)
@@ -654,6 +666,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
     }
 
     fun volumeUp(): Boolean {
+        if (!checkPhysicalSafety("VOLUME_UP", targetText = "Volume Up")) return false
         return try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
             audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
@@ -666,6 +679,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
     }
 
     fun volumeDown(): Boolean {
+        if (!checkPhysicalSafety("VOLUME_DOWN", targetText = "Volume Down")) return false
         return try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
             audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
@@ -791,7 +805,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         context: Context,
         durationMinutes: Int,
         taskPrompt: String = "Cihazı Keşfet ve İncele",
-        reasoner: AIAgentScreenReasoner? = null,
+        brain: com.example.agent.brain.AgentBrain? = null,
         profile: UserProfileEntity? = null,
         onStatusUpdate: (String) -> Unit,
         onFinished: (learnedCount: Int) -> Unit
@@ -811,7 +825,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
                     service = this@AiDeviceAccessibilityService,
                     durationMinutes = durationMinutes,
                     taskPrompt = taskPrompt,
-                    reasoner = reasoner,
+                    brain = brain,
                     profile = profile,
                     onCountdownTick = { remaining ->
                         _remainingTimeSeconds.value = remaining

@@ -26,6 +26,11 @@ import com.example.data.model.PersonalityTone
 import com.example.data.model.UserProfileEntity
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.MemoryRepository
+import com.example.agent.brain.AgentBrain
+import com.example.agent.multibrain.MultiBrainOrchestrator
+import com.example.agent.multibrain.adapters.GroqReasoningBrainAdapter
+import com.example.agent.multibrain.adapters.HuggingFaceVisionBrainAdapter
+import com.example.agent.multibrain.adapters.GeminiAdvisorBrainAdapter
 import com.example.service.AiDeviceAccessibilityService
 import com.example.service.DeviceAgentExecutor
 import com.example.service.ScreenSnapshot
@@ -49,7 +54,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val memoryRepository = MemoryRepository(database.userProfileDao(), database.memoryDao())
     private val chatRepository = ChatRepository(database.chatMessageDao())
     private val aiProviderManager = AIProviderManager(memoryRepository, credentialStore)
-    private val screenReasoner = com.example.ai.AIAgentScreenReasoner(aiProviderManager)
+    private val agentBrain = AgentBrain(aiProviderManager)
+    
+    private val orchestrator: MultiBrainOrchestrator by lazy {
+        val orch = MultiBrainOrchestrator(agentBrain.workingMemory)
+        orch.setBrains(
+            reasoning = GroqReasoningBrainAdapter(aiProviderManager),
+            vision = HuggingFaceVisionBrainAdapter(aiProviderManager),
+            advisor = GeminiAdvisorBrainAdapter(aiProviderManager)
+        )
+        orch
+    }
 
     private val _isGenerating = MutableStateFlow(false)
     private val _streamingText = MutableStateFlow("")
@@ -78,6 +93,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         initVoiceManager()
         checkAccessibilityStatus()
         syncExternalDownloadsMemoryOnStartup()
+        agentBrain.enableMultiBrain(orchestrator)
         viewModelScope.launch {
             val profile = memoryRepository.getUserProfileOnce()
             val provider = profile?.preferredAiProvider ?: "gemini"
@@ -294,6 +310,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             orbState = orbState,
             activeProviderId = activeProvider,
             selectedModel = currentModel,
+            activeProviderApiKey = aiProviderManager.getApiKey(activeProvider),
             availableModels = availableModels,
             liveSnapshot = liveSnapshot,
             liveScreenshot = liveScreenshot,
@@ -407,7 +424,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     val execResult = DeviceAgentExecutor.executeSmartAutonomousTask(
                         context = getApplication(),
                         command = command,
-                        reasoner = screenReasoner,
+                        brain = agentBrain,
                         onStatusUpdate = { status ->
                             _explorationStatusText.value = status
                         }
@@ -460,7 +477,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     context = getApplication<Application>(),
                     durationMinutes = durationMinutes,
                     taskPrompt = taskName,
-                    reasoner = screenReasoner,
+                    brain = agentBrain,
                     profile = profile,
                     onStatusUpdate = { status ->
                         _explorationStatusText.value = status
