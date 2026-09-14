@@ -620,12 +620,21 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         tone: PersonalityTone,
         expectation: String,
         providerId: String,
-        apiKey: String
+        apiKey: String,
+        architecture: String = "GROQ_HF_GEMINI",
+        apiKeys: Map<String, String> = emptyMap()
     ) {
         viewModelScope.launch {
-            if (apiKey.isNotBlank()) {
+            if (apiKeys.isNotEmpty()) {
+                apiKeys.forEach { (id, key) -> if (key.isNotBlank()) credentialStore.saveApiKey(id, key) }
+            } else if (apiKey.isNotBlank()) {
                 credentialStore.saveApiKey(providerId, apiKey)
             }
+            credentialStore.saveMultiBrainArchitecture(architecture)
+            orchestrator.updateArchitecture(
+                if (architecture.equals("GROQ_HF", ignoreCase = true)) MultiBrainOrchestrator.Architecture.GROQ_HF
+                else MultiBrainOrchestrator.Architecture.GROQ_HF_GEMINI
+            )
             val existing = memoryRepository.getUserProfileOnce()
             val updated = (existing ?: UserProfileEntity()).copy(
                 aiName = aiName,
@@ -642,7 +651,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             val allMemories = memoryRepository.getAllMemoriesOnce()
             MemoryFileManager.exportMemoryToDownloads(getApplication(), updated, allMemories)
 
-            val welcome = "Merhaba $userName, ben $aiName. Sürekli dinleme ve canlı ekran parmak kontrol modundayım. 'WhatsApp'tan Ahmet'e mesaj at', 'YouTube'da kedi ara' veya '30 dk gez' demen yeterli."
+            val modeText = if (architecture.equals("GROQ_HF", ignoreCase = true)) "2 AI: Groq + Hugging Face Vision" else "3 AI: Groq + Hugging Face Vision + Gemini"
+            val welcome = "Merhaba $userName, ben $aiName. $modeText aktif. Otonom görevlerde seçtiğin AI ekibi birlikte çalışacak; '30 dk gez' dediğinde de aynı ekip kullanılacak."
             speakText(welcome)
             startContinuousVoiceListening()
         }

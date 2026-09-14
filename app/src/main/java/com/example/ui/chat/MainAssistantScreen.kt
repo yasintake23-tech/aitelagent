@@ -584,8 +584,13 @@ fun MainAssistantScreen(
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
+                                val modeLabel = if (uiState.multiBrainArchitecture.equals("GROQ_HF", ignoreCase = true)) {
+                                    "2 AI • Groq + Hugging Face Vision"
+                                } else {
+                                    "3 AI • Groq + Hugging Face Vision + Gemini"
+                                }
                                 Text(
-                                    text = if (uiState.isAgentControlling) "Canlı parmakla gezip hafızaya yazar" else "Telefonu kurcalar & her yeri öğrenir",
+                                    text = if (uiState.isAgentControlling) "$modeLabel • birlikte çalışıyor" else "$modeLabel • canlı keşif",
                                     color = TextSecondary,
                                     fontSize = 11.sp
                                 )

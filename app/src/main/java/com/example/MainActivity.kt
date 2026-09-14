@@ -86,8 +86,8 @@ class MainActivity : ComponentActivity() {
                                 onValidateCredentials = { providerId, key ->
                                     viewModel.validateCredentials(providerId, key)
                                 },
-                                onAwakeningComplete = { aiName, userName, tone, expectation, providerId, apiKey ->
-                                    viewModel.completeAwakening(aiName, userName, tone, expectation, providerId, apiKey)
+                                onAwakeningComplete = { aiName, userName, tone, expectation, providerId, apiKey, architecture, apiKeys ->
+                                    viewModel.completeAwakening(aiName, userName, tone, expectation, providerId, apiKey, architecture, apiKeys)
                                 }
                             )
                         }

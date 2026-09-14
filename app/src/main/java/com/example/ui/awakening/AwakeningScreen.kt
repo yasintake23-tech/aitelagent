@@ -17,6 +17,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,12 +30,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -45,6 +48,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -54,6 +58,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -63,12 +68,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -79,6 +87,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -87,10 +97,12 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
+import com.example.R
 import com.example.ai.AIProvider
 import com.example.ai.ProviderValidationResult
 import com.example.data.model.PersonalityTone
 import com.example.ui.theme.CharcoalCore
+import com.example.ui.theme.AppleBlue
 import com.example.ui.theme.DarkGraphite
 import com.example.ui.theme.ObsidianBlack
 import com.example.ui.theme.OffWhiteCanvas
@@ -106,9 +118,10 @@ import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
 
 enum class AwakeningStage {
-    CHOOSE_BRAIN_PROMPT,        // Question appears: "Beynimi seçmek ister misin?"
-    BRAIN_CAROUSEL,             // Apple-style horizontal provider selection carousel
-    API_EXPLANATION_AND_INPUT,  // "Güzel seçim. Şimdi beni çalıştırmak için birkaç bilgiye ihtiyacım var."
+    CHOOSE_BRAIN_PROMPT,
+    BRAIN_CAROUSEL,
+    API_EXPLANATION_AND_INPUT,
+    MULTI_BRAIN_API_SETUP,
     VERIFICATION_ACTIVE,        // Living sphere active with real status: "Bağlantı kuruluyor..."
     BREAKOUT_SURGE,             // Sphere pauses, then breaks through the top circle boundary!
     HELLO_TRANSFORMATION,       // Sphere decelerates and smoothly morphs into "Merhaba."
@@ -131,11 +144,15 @@ data class ProviderDisplayItem(
 fun AwakeningScreen(
     availableProviders: List<AIProvider> = emptyList(),
     onValidateCredentials: suspend (providerId: String, key: String) -> ProviderValidationResult = { _, _ -> ProviderValidationResult(true) },
-    onAwakeningComplete: (aiName: String, userName: String, tone: PersonalityTone, expectation: String, providerId: String, apiKey: String) -> Unit
+    onAwakeningComplete: (aiName: String, userName: String, tone: PersonalityTone, expectation: String, providerId: String, apiKey: String, architecture: String, apiKeys: Map<String, String>) -> Unit
 ) {
     var stage by remember { mutableStateOf(AwakeningStage.CHOOSE_BRAIN_PROMPT) }
-    var selectedProviderId by remember { mutableStateOf("gemini") }
+    var selectedProviderId by remember { mutableStateOf("groq") }
+    var selectedArchitecture by remember { mutableStateOf("GROQ_HF_GEMINI") }
     var enteredApiKey by remember { mutableStateOf("") }
+    val enteredKeys = remember { mutableStateMapOf<String, String>() }
+    var activeKeyProvider by remember { mutableStateOf("groq") }
+    var showApiHelp by remember { mutableStateOf(false) }
     var enteredAiName by remember { mutableStateOf("Nova") }
     var enteredUserName by remember { mutableStateOf("") }
 
@@ -166,6 +183,10 @@ fun AwakeningScreen(
             }
             else -> { /* User interaction controlled */ }
         }
+    }
+
+    if (showApiHelp) {
+        ApiSetupHelpDialog(onDismiss = { showApiHelp = false })
     }
 
     Box(
@@ -200,9 +221,18 @@ fun AwakeningScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            IconButton(
+                                onClick = { showApiHelp = true },
+                                modifier = Modifier.testTag("awakening_api_help_button")
+                            ) {
+                                Icon(Icons.Default.HelpOutline, contentDescription = "API nasıl alınır?", tint = TextPrimary)
+                            }
+                        }
 
-                        // Center minimalist AI Circle with floating organic black sphere
                         LivingCoreView(isEnergetic = false)
 
                         Column(
@@ -251,25 +281,12 @@ fun AwakeningScreen(
                 }
 
                 AwakeningStage.BRAIN_CAROUSEL -> {
-                    BrainCarouselView(
-                        onProviderSelected = { provider ->
-                            selectedProviderId = provider.id
-                            if (!provider.requiresKey) {
-                                enteredApiKey = ""
-                                stage = AwakeningStage.VERIFICATION_ACTIVE
-                                coroutineScope.launch {
-                                    runVerificationProcess(
-                                        providerId = provider.id,
-                                        apiKey = "",
-                                        onValidate = onValidateCredentials,
-                                        onStepUpdate = { verificationStepText = it },
-                                        onError = { verificationError = it },
-                                        onSuccess = { stage = AwakeningStage.BREAKOUT_SURGE }
-                                    )
-                                }
-                            } else {
-                                stage = AwakeningStage.API_EXPLANATION_AND_INPUT
-                            }
+                    MultiBrainSelectionView(
+                        selectedArchitecture = selectedArchitecture,
+                        onHelp = { showApiHelp = true },
+                        onSelect = { architecture ->
+                            selectedArchitecture = architecture
+                            stage = AwakeningStage.MULTI_BRAIN_API_SETUP
                         }
                     )
                 }
@@ -296,6 +313,33 @@ fun AwakeningScreen(
                     )
                 }
 
+                AwakeningStage.MULTI_BRAIN_API_SETUP -> {
+                    MultiBrainApiSetupView(
+                        architecture = selectedArchitecture,
+                        keys = enteredKeys,
+                        onHelp = { showApiHelp = true },
+                        onKeysComplete = {
+                            stage = AwakeningStage.VERIFICATION_ACTIVE
+                            verificationError = null
+                            coroutineScope.launch {
+                                val providers = listOf("groq", "huggingface") + if (selectedArchitecture == "GROQ_HF_GEMINI") listOf("gemini") else emptyList()
+                                for (provider in providers) {
+                                    verificationStepText = "${provider.uppercase()} API doğrulanıyor..."
+                                    val result = onValidateCredentials(provider, enteredKeys[provider].orEmpty())
+                                    if (!result.isSuccess) {
+                                        verificationError = result.errorMessage ?: "${provider.uppercase()} API doğrulanamadı."
+                                        return@launch
+                                    }
+                                }
+                                verificationStepText = "Tüm AI bağlantıları hazır."
+                                delay(700)
+                                stage = AwakeningStage.BREAKOUT_SURGE
+                            }
+                        },
+                        onBack = { stage = AwakeningStage.BRAIN_CAROUSEL }
+                    )
+                }
+
                 AwakeningStage.VERIFICATION_ACTIVE -> {
                     VerificationActiveView(
                         stepText = verificationStepText,
@@ -303,19 +347,27 @@ fun AwakeningScreen(
                         onRetry = {
                             verificationError = null
                             coroutineScope.launch {
-                                runVerificationProcess(
-                                    providerId = selectedProviderId,
-                                    apiKey = enteredApiKey,
-                                    onValidate = onValidateCredentials,
-                                    onStepUpdate = { verificationStepText = it },
-                                    onError = { verificationError = it },
-                                    onSuccess = { stage = AwakeningStage.BREAKOUT_SURGE }
-                                )
+                                val providers = if (enteredKeys.isNotEmpty()) {
+                                    listOf("groq", "huggingface") + if (selectedArchitecture == "GROQ_HF_GEMINI") listOf("gemini") else emptyList()
+                                } else {
+                                    listOf(selectedProviderId)
+                                }
+                                for (provider in providers) {
+                                    verificationStepText = "${provider.uppercase()} API doğrulanıyor..."
+                                    val result = onValidateCredentials(provider, enteredKeys[provider].orEmpty().ifBlank { enteredApiKey })
+                                    if (!result.isSuccess) {
+                                        verificationError = result.errorMessage ?: "${provider.uppercase()} API doğrulanamadı."
+                                        return@launch
+                                    }
+                                }
+                                verificationStepText = "Tüm AI bağlantıları hazır."
+                                delay(700)
+                                stage = AwakeningStage.BREAKOUT_SURGE
                             }
                         },
                         onChangeProvider = {
                             verificationError = null
-                            stage = AwakeningStage.BRAIN_CAROUSEL
+                            if (enteredKeys.isNotEmpty()) stage = AwakeningStage.MULTI_BRAIN_API_SETUP else stage = AwakeningStage.BRAIN_CAROUSEL
                         }
                     )
                 }
@@ -350,14 +402,23 @@ fun AwakeningScreen(
                     AskUserNameView(
                         onSubmitUserName = { name ->
                             enteredUserName = name.ifBlank { "Dostum" }
-                            onAwakeningComplete(
-                                enteredAiName,
-                                enteredUserName,
-                                PersonalityTone.SAMIMI,
-                                "Günlük Yaşam & Genel Asistan",
-                                selectedProviderId,
-                                enteredApiKey
-                            )
+                            if (enteredKeys.isNotEmpty()) {
+                                enteredApiKey = enteredKeys["groq"].orEmpty()
+                            }
+                            // Multi-Brain setup has already persisted/validated keys.
+                            if (selectedArchitecture.isNotBlank() && enteredKeys.isNotEmpty()) {
+                                onAwakeningComplete(
+                                    enteredAiName, enteredUserName, PersonalityTone.SAMIMI,
+                                    "Günlük Yaşam & Genel Asistan", "groq", enteredApiKey,
+                                    selectedArchitecture, enteredKeys.toMap()
+                                )
+                            } else {
+                                onAwakeningComplete(
+                                    enteredAiName, enteredUserName, PersonalityTone.SAMIMI,
+                                    "Günlük Yaşam & Genel Asistan", selectedProviderId, enteredApiKey,
+                                    "GROQ_HF_GEMINI", mapOf(selectedProviderId to enteredApiKey)
+                                )
+                            }
                         }
                     )
                 }
@@ -687,6 +748,190 @@ fun BrainCarouselView(
             }
         }
     }
+}
+
+
+// ---------------------- MULTI-BRAIN ONBOARDING ----------------------
+
+@Composable
+fun MultiBrainSelectionView(
+    selectedArchitecture: String,
+    onSelect: (String) -> Unit,
+    onHelp: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column {
+                Text("Çalışacak AI ekibi", color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                Text("Otonom görevlerde aynı ekran üzerinde birlikte çalışırlar.", color = TextSecondary, fontSize = 14.sp)
+            }
+            IconButton(onClick = onHelp) { Icon(Icons.Default.HelpOutline, contentDescription = "API yardım", tint = TextPrimary) }
+        }
+        BrainModeCard(
+            title = "3 AI • Önerilen",
+            subtitle = "Groq + Hugging Face Vision + Gemini",
+            details = "Groq planlar → Vision ekranı görür → Groq kararı netleştirir → Gemini son kontrolü yapar.",
+            selected = selectedArchitecture == "GROQ_HF_GEMINI",
+            onClick = { onSelect("GROQ_HF_GEMINI") }
+        )
+        BrainModeCard(
+            title = "2 AI • Hızlı",
+            subtitle = "Groq + Hugging Face Vision",
+            details = "Daha az API çağrısı; yine de ekran görüşü + akıl yürütme birlikte çalışır.",
+            selected = selectedArchitecture == "GROQ_HF",
+            onClick = { onSelect("GROQ_HF") }
+        )
+        Spacer(Modifier.weight(1f))
+        Text("Sonradan Ayarlar > Multi-Brain bölümünden değiştirebilirsin.", color = TextMuted, fontSize = 12.sp, textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+private fun BrainModeCard(title: String, subtitle: String, details: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = if (selected) SubtleGrayBg else PureWhite,
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).border(
+            if (selected) 2.dp else 1.dp,
+            if (selected) ObsidianBlack else SubtleBorderGray,
+            RoundedCornerShape(20.dp)
+        )
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(title, color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Surface(color = if (selected) ObsidianBlack else SubtleGrayBg, shape = CircleShape, modifier = Modifier.size(24.dp)) {
+                    if (selected) Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = PureWhite, modifier = Modifier.padding(5.dp))
+                }
+            }
+            Text(subtitle, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(details, color = TextSecondary, fontSize = 12.sp, lineHeight = 18.sp)
+        }
+    }
+}
+
+@Composable
+fun MultiBrainApiSetupView(
+    architecture: String,
+    keys: MutableMap<String, String>,
+    onKeysComplete: () -> Unit,
+    onBack: () -> Unit,
+    onHelp: () -> Unit
+) {
+    val providers = buildList {
+        add("groq")
+        add("huggingface")
+        if (architecture == "GROQ_HF_GEMINI") add("gemini")
+    }
+    var currentIndex by remember { mutableIntStateOf(0) }
+    var visible by remember { mutableStateOf(false) }
+    var value by remember { mutableStateOf(keys[providers[currentIndex]].orEmpty()) }
+    var showKey by remember { mutableStateOf(false) }
+    val current = providers[currentIndex]
+
+    LaunchedEffect(current) {
+        value = keys[current].orEmpty()
+        visible = false
+        delay(120)
+        visible = true
+    }
+
+    val label = when (current) {
+        "groq" -> "Groq • Reasoning"
+        "huggingface" -> "Hugging Face • Vision"
+        else -> "Gemini • Advisor"
+    }
+    val placeholder = when (current) {
+        "groq" -> "gsk_..."
+        "huggingface" -> "hf_..."
+        else -> "AIza..."
+    }
+
+    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column {
+                Text("API anahtarları", color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                Text("${currentIndex + 1}/${providers.size} • $label", color = TextSecondary, fontSize = 13.sp)
+            }
+            IconButton(onClick = onHelp) { Icon(Icons.Default.HelpOutline, contentDescription = "API nasıl alınır?", tint = TextPrimary) }
+        }
+        AnimatedVisibility(visible = visible) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = when (current) {
+                        "groq" -> "Görev planlama ve akıl yürütmeden sorumlu."
+                        "huggingface" -> "Canlı ekran görüntüsünü ve görsel hedefleri analiz eder."
+                        else -> "Son kararın bağımsız danışmanı ve risk kontrolü."
+                    },
+                    color = TextSecondary, fontSize = 13.sp, lineHeight = 19.sp
+                )
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it; keys[current] = it },
+                    singleLine = true,
+                    placeholder = { Text(placeholder, color = TextMuted) },
+                    label = { Text(label) },
+                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = { IconButton(onClick = { showKey = !showKey }) { Icon(if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility, contentDescription = null) } },
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = when (current) {
+                        "groq" -> "console.groq.com/keys"
+                        "huggingface" -> "huggingface.co/settings/tokens"
+                        else -> "aistudio.google.com/apikey"
+                    },
+                    color = AppleBlue, fontSize = 12.sp
+                )
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            TextButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text("Geri") }
+            Button(
+                onClick = {
+                    keys[current] = value.trim()
+                    if (currentIndex < providers.lastIndex) currentIndex++ else onKeysComplete()
+                },
+                enabled = value.isNotBlank(),
+                modifier = Modifier.weight(1.6f).height(52.dp),
+                shape = RoundedCornerShape(24.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = ObsidianBlack)
+            ) { Text(if (currentIndex < providers.lastIndex) "Sonraki" else "Bağlantıları Doğrula", color = PureWhite) }
+        }
+    }
+}
+
+@Composable
+fun ApiSetupHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Tamam") } },
+        title = { Text("API anahtarlarını nasıl alırım?") },
+        text = {
+            Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Image(
+                    painter = painterResource(R.drawable.api_setup_guide),
+                    contentDescription = "Lumina AI API kurulum rehberi",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxWidth().height(210.dp).clip(RoundedCornerShape(16.dp))
+                )
+                Text("1 • Groq", fontWeight = FontWeight.Bold)
+                Text("console.groq.com/keys adresine gir → API Keys bölümünden Create API Key seç → anahtarı Lumina'ya yapıştır.")
+                Text("2 • Hugging Face", fontWeight = FontWeight.Bold)
+                Text("huggingface.co/settings/tokens adresine gir → New token oluştur. Vision için gereken erişimi olan bir token kullan.")
+                Text("3 • Gemini", fontWeight = FontWeight.Bold)
+                Text("Google AI Studio'daki API Keys sayfasından yeni anahtar oluştur. Eylül 2026 itibarıyla yeni anahtarlar için güncel güvenlik/anahtar türü kurallarını takip et.")
+                Text("Güvenlik", fontWeight = FontWeight.Bold)
+                Text("Anahtarlar uygulamanın yerel credential deposunda provider bazında tutulur; sohbet hafızasına yazılmaz.")
+            }
+        }
+    )
 }
 
 // ---------------------- 8. API SEÇİMİNDEN SONRA & BİLGİ ALMA ----------------------
