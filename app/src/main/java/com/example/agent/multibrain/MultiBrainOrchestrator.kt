@@ -137,7 +137,7 @@ class MultiBrainOrchestrator(
             }
         }
 
-        return@withLock currentProposal.withTask(taskId)
+        return currentProposal.withTask(taskId)
     }
 
     private fun createReplan(taskId: String, message: String, code: String): AgentMessage = AgentMessage(

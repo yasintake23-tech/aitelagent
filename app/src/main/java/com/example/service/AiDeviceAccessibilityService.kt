@@ -240,7 +240,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
                     AgentLogStore.record(applicationContext, "ERROR", "AiAccessibility", "Screenshot exception: ${e.localizedMessage}")
                     deferred.complete(null)
                 }
-                deferred.await()
+                return deferred.await()
             }
 
             var bitmap = takeOnce()
