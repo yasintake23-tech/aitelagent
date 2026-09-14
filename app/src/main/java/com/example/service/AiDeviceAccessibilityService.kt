@@ -42,6 +42,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.Locale
 
 data class ScreenNodeData(
@@ -172,38 +174,83 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         )
     }
 
-    suspend fun captureLiveScreenshotAsync(): Bitmap? = withContext(Dispatchers.Main) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val deferred = CompletableDeferred<Bitmap?>()
-            try {
-                takeScreenshot(
-                    Display.DEFAULT_DISPLAY,
-                    applicationContext.mainExecutor,
-                    object : TakeScreenshotCallback {
-                        override fun onSuccess(screenshotResult: ScreenshotResult) {
-                            val bitmap = Bitmap.wrapHardwareBuffer(
-                                screenshotResult.hardwareBuffer,
-                                screenshotResult.colorSpace
-                            )?.copy(Bitmap.Config.ARGB_8888, false)
-                            _liveScreenshotBitmap.value = bitmap
-                            deferred.complete(bitmap)
-                        }
+    private val screenshotMutex = Mutex()
+    @Volatile private var lastSuccessfulScreenshotAtMs: Long = 0L
+    private var lastScreenshotFailureAtMs: Long = 0L
 
-                        override fun onFailure(errorCode: Int) {
-                            Log.e("AiAccessibility", "Screenshot capture failed: $errorCode")
-                            AgentLogStore.record(applicationContext, "ERROR", "AiAccessibility", "Screenshot capture failed: errorCode=$errorCode")
-                            deferred.complete(null)
-                        }
-                    }
-                )
-            } catch (e: Exception) {
-                Log.e("AiAccessibility", "Screenshot exception", e)
-                AgentLogStore.record(applicationContext, "ERROR", "AiAccessibility", "Screenshot exception: ${e.localizedMessage}")
-                deferred.complete(null)
+    /**
+     * Centralized screenshot gate. Android returns error code 3 when screenshots are requested
+     * too frequently, so every caller shares one serialized, throttled capture path.
+     */
+    suspend fun captureLiveScreenshotAsync(forceRefresh: Boolean = false): Bitmap? = screenshotMutex.withLock {
+        withContext(Dispatchers.Main) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext null
+
+            val now = System.currentTimeMillis()
+            val cached = _liveScreenshotBitmap.value
+            val sinceLastSuccess = now - lastSuccessfulScreenshotAtMs
+            val minimumIntervalMs = if (forceRefresh) 1200L else 1600L
+
+            if (!forceRefresh && cached != null && sinceLastSuccess in 0 until minimumIntervalMs) {
+                return@withContext cached
             }
-            deferred.await()
-        } else {
-            null
+
+            if (forceRefresh && cached != null && sinceLastSuccess < minimumIntervalMs) {
+                delay(minimumIntervalMs - sinceLastSuccess)
+            }
+
+            suspend fun takeOnce(): Bitmap? {
+                val deferred = CompletableDeferred<Bitmap?>()
+                try {
+                    takeScreenshot(
+                        Display.DEFAULT_DISPLAY,
+                        applicationContext.mainExecutor,
+                        object : TakeScreenshotCallback {
+                            override fun onSuccess(screenshotResult: ScreenshotResult) {
+                                val bitmap = Bitmap.wrapHardwareBuffer(
+                                    screenshotResult.hardwareBuffer,
+                                    screenshotResult.colorSpace
+                                )?.copy(Bitmap.Config.ARGB_8888, false)
+                                _liveScreenshotBitmap.value = bitmap
+                                lastSuccessfulScreenshotAtMs = System.currentTimeMillis()
+                                deferred.complete(bitmap)
+                            }
+
+                            override fun onFailure(errorCode: Int) {
+                                val level = if (errorCode == 3) "WARN" else "ERROR"
+                                val nowFailure = System.currentTimeMillis()
+                                // Avoid filling the persistent log once per second for a platform throttle.
+                                if (nowFailure - lastScreenshotFailureAtMs > 2500L) {
+                                    lastScreenshotFailureAtMs = nowFailure
+                                    val reason = when (errorCode) {
+                                        AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "Too frequent"
+                                        AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "Secure window"
+                                        AccessibilityService.ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "No accessibility access"
+                                        else -> "Platform error"
+                                    }
+                                    Log.w("AiAccessibility", "Screenshot capture failed: errorCode=$errorCode ($reason)")
+                                    AgentLogStore.record(applicationContext, level, "AiAccessibility", "Screenshot capture failed: errorCode=$errorCode ($reason)")
+                                }
+                                deferred.complete(null)
+                            }
+                        }
+                    )
+                } catch (e: Exception) {
+                    Log.e("AiAccessibility", "Screenshot exception", e)
+                    AgentLogStore.record(applicationContext, "ERROR", "AiAccessibility", "Screenshot exception: ${e.localizedMessage}")
+                    deferred.complete(null)
+                }
+                deferred.await()
+            }
+
+            var bitmap = takeOnce()
+            if (bitmap == null && cached == null) {
+                // Error 3 is a rate-limit style condition; wait before one controlled retry.
+                delay(1400L)
+                bitmap = takeOnce()
+            }
+
+            bitmap ?: _liveScreenshotBitmap.value
         }
     }
 

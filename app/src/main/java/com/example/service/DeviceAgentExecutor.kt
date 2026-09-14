@@ -680,10 +680,10 @@ object DeviceAgentExecutor {
         val selectedModel = aiProviderManager.getSelectedModel(activeProviderId)
 
         val budget = TaskBudget(
-            maxSteps = maxSteps,
-            maxRetriesPerStep = 3,
-            overallTimeoutMs = 180_000L,
-            perStepTimeoutMs = 25_000L,
+            maxSteps = maxSteps.coerceIn(1, 16),
+            maxRetriesPerStep = 2,
+            overallTimeoutMs = 300_000L,
+            perStepTimeoutMs = 30_000L,
             maxConsecutiveFailures = 3
         )
 
@@ -800,9 +800,38 @@ object DeviceAgentExecutor {
             }
 
             if (proposal.actionType == BrainActionType.REPLAN) {
-                onStatusUpdate?.invoke("Yeniden planlanıyor...")
-                AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Yeniden planlanıyor...")
-                brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
+                val lowerReason = proposal.reason.lowercase(Locale("tr", "TR"))
+                val providerFailure = lowerReason.contains("provider") ||
+                    lowerReason.contains("api_key") ||
+                    lowerReason.contains("multi_brain_error") ||
+                    lowerReason.contains("vision") ||
+                    lowerReason.contains("screenshot")
+
+                if (providerFailure) {
+                    brain.workingMemory.recordFailure(currentStep, "PLANNING", proposal.reason)
+                    val failures = brain.workingMemory.state.consecutiveFailures
+                    if (failures >= 2) {
+                        val terminal = "AI karar zinciri iki kez başarısız oldu: ${proposal.reason}"
+                        AgentLifecycleManager.failSession(taskSession.taskId, terminal)
+                        finalSummary = terminal
+                        break
+                    }
+                    onStatusUpdate?.invoke("AI sağlayıcısı yanıt vermedi; kontrollü yeniden deneniyor (${failures}/2)...")
+                    AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Sağlayıcı hatası sonrası kontrollü yeniden deneme")
+                    delay(1500L)
+                } else {
+                    onStatusUpdate?.invoke("Yeniden planlanıyor...")
+                    AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Yeniden planlanıyor...")
+                    try {
+                        brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
+                    } catch (e: Exception) {
+                        val terminal = "Yeniden planlama başarısız: ${e.localizedMessage ?: "Bilinmeyen hata"}"
+                        AgentLifecycleManager.failSession(taskSession.taskId, terminal)
+                        finalSummary = terminal
+                        break
+                    }
+                    delay(700L)
+                }
                 currentStep++
                 continue
             }
@@ -886,6 +915,9 @@ object DeviceAgentExecutor {
                 brain.replan(afterSnapshot, apiKey, activeProviderId, selectedModel)
             }
 
+            // Pace the loop so one task cannot fire dozens of actions back-to-back while
+            // Android is still animating or Accessibility events are still settling.
+            delay(650L)
             currentStep++
         }
 

@@ -6,6 +6,8 @@ import com.example.agent.brain.AgentActionType
 import com.example.agent.brain.AgentWorkingMemory
 import com.example.data.security.AgentLogStore
 import com.example.service.AiDeviceAccessibilityService
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Deterministic hierarchical multi-brain council.
@@ -31,6 +33,7 @@ class MultiBrainOrchestrator(
 
     private val messages = mutableListOf<AgentMessage>()
     private var activeTaskId: String? = null
+    private val coordinationMutex = Mutex()
 
     fun setBrains(
         reasoning: ReasoningBrain?,
@@ -134,7 +137,7 @@ class MultiBrainOrchestrator(
             }
         }
 
-        return currentProposal.withTask(taskId)
+        return@withLock currentProposal.withTask(taskId)
     }
 
     private fun createReplan(taskId: String, message: String, code: String): AgentMessage = AgentMessage(

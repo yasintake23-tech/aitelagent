@@ -400,9 +400,13 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        // If previously controlling and receiving a new non-stop command, clean up prior task first
+        // While an autonomous task is running, the microphone remains active but EVERY command
+        // except an explicit stop is ignored. This prevents speech recognition from spawning
+        // competing tasks or interrupting the active agent.
         if (_isAgentControlling.value) {
-            stopAutonomousDeviceControl()
+            AgentLogStore.record(getApplication(), "INFO", "AssistantViewModel", "Ignored voice command while agent busy: $command")
+            _explorationStatusText.value = "Görev devam ediyor • Durdurmak için 'dur' de."
+            return
         }
 
         when (classification.intent) {
@@ -426,13 +430,14 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                 }
 
                 IntentRouter.logRoutingDecision(command, classification, agentStarted = true)
+                // Claim the single agent slot synchronously before launching async work.
+                // This closes the race where two recognition results arrive back-to-back.
+                _isAgentControlling.value = true
+                _orbState.value = OrbState.THINKING
                 viewModelScope.launch {
-                    // Pause speech listening during autonomous execution to avoid mic feedback loop
-                    voiceManager?.stopListening()
-
-                    // ONLY transition UI to agent mode after intent has been strictly validated
-                    _orbState.value = OrbState.THINKING
-                    _isAgentControlling.value = true
+                    // Keep the microphone alive while the autonomous task runs.
+                    // Spoken commands are filtered by handleSpokenCommand; only an explicit stop
+                    // command is accepted until the task finishes.
                     _currentTaskName.value = command
                     _explorationStatusText.value = "Görev analiz ediliyor..."
 
@@ -559,6 +564,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun sendMessage(userText: String, speakResponse: Boolean = false) {
         if (userText.isBlank() || _isGenerating.value) return
+        if (_isAgentControlling.value) {
+            AgentLogStore.record(getApplication(), "INFO", "AssistantViewModel", "Ignored typed input while agent busy: $userText")
+            return
+        }
 
         // If a new user command or query is sent, immediately interrupt/flush previous speech
         stopSpeaking()

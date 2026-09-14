@@ -81,15 +81,34 @@ class AgentBrain(
         val taskSpec = parseTaskSpecFromGoal(userPrompt, intentType, apiKey, providerId, model)
         currentTaskSpec = taskSpec
 
-        // 2. Dinamik Plan Oluştur
-        val plan = planner.createPlan(
-            taskSpec = taskSpec,
-            workingMemory = workingMemory,
-            snapshot = snapshot,
-            apiKey = apiKey,
-            providerId = providerId,
-            model = model ?: DEFAULT_MODEL
-        )
+        // 2. Plan. In Multi-Brain mode the council itself owns per-step reasoning/refinement.
+        // Do not spend an extra LLM round on a separate planner; this reduces latency and
+        // prevents the agent from "thinking twice" before the first physical action.
+        val plan = if (isMultiBrainEnabled) {
+            AgentPlan(
+                originalGoal = taskSpec.originalGoal,
+                targetApp = taskSpec.targetApp,
+                targetEntity = taskSpec.targetEntity,
+                requestedAction = taskSpec.requestedAction,
+                subGoals = listOf(
+                    SubGoal(
+                        id = 0,
+                        description = taskSpec.originalGoal,
+                        expectedOutcome = "Kullanıcının ana hedefi gerçekleşmiş olmalı."
+                    )
+                ),
+                completionCriteria = "Kullanıcının ana hedefi doğrulanmalı."
+            )
+        } else {
+            planner.createPlan(
+                taskSpec = taskSpec,
+                workingMemory = workingMemory,
+                snapshot = snapshot,
+                apiKey = apiKey,
+                providerId = providerId,
+                model = model ?: DEFAULT_MODEL
+            )
+        }
 
         currentPlan = plan
         workingMemory.setPlan(
@@ -212,11 +231,7 @@ class AgentBrain(
                 val cached = AiDeviceAccessibilityService.liveScreenshotBitmap.value
                 var fresh: android.graphics.Bitmap? = null
                 if (service != null) {
-                    repeat(2) {
-                        fresh = service.captureLiveScreenshotAsync()
-                        if (fresh != null) return@repeat
-                        kotlinx.coroutines.delay(150L)
-                    }
+                    fresh = service.captureLiveScreenshotAsync()
                 }
                 fresh ?: cached
             }
