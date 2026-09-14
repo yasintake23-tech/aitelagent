@@ -60,6 +60,18 @@ class CredentialStore(context: Context) {
         return prefs.getString("vision_model_${providerId.lowercase()}", defaultModel)?.takeIf { it.isNotBlank() } ?: defaultModel
     }
 
+    fun saveMultiBrainArchitecture(architecture: String) {
+        prefs.edit().putString("multi_brain_architecture", architecture.trim().uppercase()).apply()
+    }
+
+    fun getMultiBrainArchitecture(defaultArchitecture: String = "GROQ_HF_GEMINI"): String {
+        return prefs.getString("multi_brain_architecture", defaultArchitecture)
+            ?.trim()
+            ?.uppercase()
+            ?.takeIf { it.isNotBlank() }
+            ?: defaultArchitecture
+    }
+
     fun clearAllCredentials() {
         prefs.edit().clear().apply()
     }

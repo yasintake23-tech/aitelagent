@@ -82,7 +82,14 @@ object StructuredExplorationEngine {
 
         val activeBrain = brain ?: throw IllegalArgumentException("AgentBrain must be provided for Multi-Brain exploration")
         val multiBrainActive = activeBrain.isMultiBrainEnabled()
+        val architecture = if (multiBrainActive) credentialStore.getMultiBrainArchitecture() else "SINGLE"
         val activeProviderId = if (multiBrainActive) "groq" else (dbProfile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini")
+        if (multiBrainActive) {
+            val missing = aiProviderManager.getMissingMultiBrainProviders(architecture)
+            if (missing.isNotEmpty()) {
+                throw IllegalStateException("Multi-Brain API anahtarları eksik: ${missing.joinToString(", ")}")
+            }
+        }
         val apiKey = aiProviderManager.getApiKey(activeProviderId)
         val selectedModel = aiProviderManager.getSelectedModel(activeProviderId)
 

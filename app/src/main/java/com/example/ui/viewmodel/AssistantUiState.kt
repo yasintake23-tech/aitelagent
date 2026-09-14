@@ -36,6 +36,10 @@ data class AssistantUiState(
     val selectedModel: String = "",
     val activeProviderApiKey: String = "",
     val availableModels: List<String> = emptyList(),
+    val multiBrainArchitecture: String = "GROQ_HF_GEMINI",
+    val multiBrainGroqConfigured: Boolean = false,
+    val multiBrainHfConfigured: Boolean = false,
+    val multiBrainGeminiConfigured: Boolean = false,
     val liveSnapshot: ScreenSnapshot = ScreenSnapshot(
         packageName = "",
         activityName = "",

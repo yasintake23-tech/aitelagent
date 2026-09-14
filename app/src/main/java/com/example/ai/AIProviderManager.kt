@@ -96,6 +96,15 @@ class AIProviderManager(
         )
     }
 
+    fun getMissingMultiBrainProviders(architecture: String): List<String> {
+        val ids = if (architecture.equals("GROQ_HF", ignoreCase = true)) {
+            listOf("groq", "huggingface")
+        } else {
+            listOf("groq", "huggingface", "gemini")
+        }
+        return ids.filter { credentialStore.getApiKey(it).isBlank() }
+    }
+
     fun getApiKey(providerId: String): String {
         return credentialStore.getApiKey(providerId)
     }

@@ -86,6 +86,11 @@ fun SettingsSheet(
     onDismiss: () -> Unit,
     onUpdateProvider: (String) -> Unit = {},
     onUpdateSelectedModel: (String) -> Unit = {},
+    multiBrainArchitecture: String = "GROQ_HF_GEMINI",
+    multiBrainGroqConfigured: Boolean = false,
+    multiBrainHfConfigured: Boolean = false,
+    multiBrainGeminiConfigured: Boolean = false,
+    onUpdateMultiBrainArchitecture: (String) -> Unit = {},
     onUpdateTone: (PersonalityTone) -> Unit,
     onUpdateAiName: (String) -> Unit,
     onUpdateUserName: (String) -> Unit,
@@ -322,6 +327,64 @@ fun SettingsSheet(
             }
 
             Spacer(modifier = Modifier.height(20.dp))
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Multi-Brain Council
+            Text(
+                text = "Multi-Brain Otonom Agent",
+                color = TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Otonom görevlerde tek bir yapay zekâ yerine 2 veya 3 ayrı AI birlikte karar verir. Normal sohbet bu moddan bağımsızdır.",
+                color = TextSecondary,
+                fontSize = 11.sp
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    "GROQ_HF" to "2 Beyin: Groq + Hugging Face Vision",
+                    "GROQ_HF_GEMINI" to "3 Beyin: Groq + Hugging Face Vision + Gemini Advisor"
+                ).forEach { (id, label) ->
+                    val selected = multiBrainArchitecture.equals(id, ignoreCase = true)
+                    Surface(
+                        color = if (selected) SubtleGrayBg else PureWhite,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                width = if (selected) 1.5.dp else 1.dp,
+                                color = if (selected) ObsidianBlack else SubtleBorderGray,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onUpdateMultiBrainArchitecture(id) }
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(label, color = TextPrimary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                            if (selected) Icon(Icons.Default.Check, contentDescription = null, tint = ObsidianBlack, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "API durumu  •  Groq: ${if (multiBrainGroqConfigured) "Hazır" else "Eksik"}  •  HF: ${if (multiBrainHfConfigured) "Hazır" else "Eksik"}${if (multiBrainArchitecture.equals("GROQ_HF_GEMINI", true)) "  •  Gemini: ${if (multiBrainGeminiConfigured) "Hazır" else "Eksik"}" else ""}",
+                color = TextSecondary,
+                fontSize = 11.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Eksik bir anahtar varsa otonom görev sessizce başka AI'ya düşmez; görev güvenli biçimde durur.",
+                color = TextMuted,
+                fontSize = 10.sp
+            )
 
             // Personality Tone Selector
             Text(

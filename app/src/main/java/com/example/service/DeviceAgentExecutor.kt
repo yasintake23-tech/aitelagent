@@ -730,9 +730,29 @@ object DeviceAgentExecutor {
         )
 
         val multiBrainActive = brain.isMultiBrainEnabled()
+        val architecture = if (multiBrainActive) {
+            credentialStore.getMultiBrainArchitecture()
+        } else {
+            "SINGLE"
+        }
         val activeProviderId = if (multiBrainActive) "groq" else (profile?.preferredAiProvider?.lowercase(Locale.ROOT) ?: "gemini")
         val activeProvider = aiProviderManager.getProvider(activeProviderId)
         val apiKey = aiProviderManager.getApiKey(activeProviderId)
+
+        if (multiBrainActive) {
+            val missing = aiProviderManager.getMissingMultiBrainProviders(architecture)
+            if (missing.isNotEmpty()) {
+                val names = missing.joinToString(", ") { aiProviderManager.getProvider(it).displayName }
+                val noKeyMsg = "Multi-Brain hazır değil. Eksik API anahtarları: $names. Ayarlar'dan her sağlayıcının anahtarını ayrı kaydedin."
+                AgentLifecycleManager.failSession("session_multibrain_nokey", noKeyMsg)
+                return@withContext AgentExecutionResult(
+                    isSuccess = false,
+                    actionType = "MULTI_BRAIN_API_KEYS_MISSING",
+                    speechFeedback = noKeyMsg,
+                    technicalLog = "Missing Multi-Brain keys: $missing architecture=$architecture"
+                )
+            }
+        }
 
         if (apiKey.isBlank()) {
             val noKeyMsg = "API Anahtarı bulunamadı. Lütfen Ayarlar'dan ${activeProvider.displayName} API Key tanımlayın."

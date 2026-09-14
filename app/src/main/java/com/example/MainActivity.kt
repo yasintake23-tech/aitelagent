@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
                                 onUpdateApiKey = { key -> viewModel.updateCustomApiKey(key) },
                                 onUpdateProvider = { providerId -> viewModel.updatePreferredProvider(providerId) },
                                 onUpdateSelectedModel = { model -> viewModel.updateSelectedModel(model) },
+                                onUpdateMultiBrainArchitecture = { architecture -> viewModel.updateMultiBrainArchitecture(architecture) },
                                 onClearChatHistory = { viewModel.clearChatHistory() },
                                 onReplayAwakening = { viewModel.replayAwakening() },
                                 onRefreshPermissions = { viewModel.checkAccessibilityStatus() },

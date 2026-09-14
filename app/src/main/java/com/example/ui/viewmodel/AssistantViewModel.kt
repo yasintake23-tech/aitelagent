@@ -58,10 +58,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     
     private val orchestrator: MultiBrainOrchestrator by lazy {
         val orch = MultiBrainOrchestrator(agentBrain.workingMemory)
+        val architecture = when (credentialStore.getMultiBrainArchitecture()) {
+            "GROQ_HF" -> MultiBrainOrchestrator.Architecture.GROQ_HF
+            else -> MultiBrainOrchestrator.Architecture.GROQ_HF_GEMINI
+        }
         orch.setBrains(
             reasoning = GroqReasoningBrainAdapter(aiProviderManager),
             vision = HuggingFaceVisionBrainAdapter(aiProviderManager),
-            advisor = GeminiAdvisorBrainAdapter(aiProviderManager)
+            advisor = GeminiAdvisorBrainAdapter(aiProviderManager),
+            architecture = architecture
         )
         orch
     }
@@ -312,6 +317,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             selectedModel = currentModel,
             activeProviderApiKey = aiProviderManager.getApiKey(activeProvider),
             availableModels = availableModels,
+            multiBrainArchitecture = credentialStore.getMultiBrainArchitecture(),
+            multiBrainGroqConfigured = credentialStore.hasApiKey("groq"),
+            multiBrainHfConfigured = credentialStore.hasApiKey("huggingface"),
+            multiBrainGeminiConfigured = credentialStore.hasApiKey("gemini"),
             liveSnapshot = liveSnapshot,
             liveScreenshot = liveScreenshot,
             virtualFingerState = virtualFinger,
@@ -729,6 +738,25 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun saveApiKeyForProvider(providerId: String, apiKey: String) {
         credentialStore.saveApiKey(providerId, apiKey)
+    }
+
+    fun updateMultiBrainArchitecture(architecture: MultiBrainOrchestrator.Architecture) {
+        credentialStore.saveMultiBrainArchitecture(architecture.name)
+        orchestrator.updateArchitecture(architecture)
+    }
+
+    fun updateMultiBrainArchitecture(architecture: String) {
+        val value = if (architecture.equals("GROQ_HF", ignoreCase = true)) {
+            MultiBrainOrchestrator.Architecture.GROQ_HF
+        } else {
+            MultiBrainOrchestrator.Architecture.GROQ_HF_GEMINI
+        }
+        updateMultiBrainArchitecture(value)
+    }
+
+    fun getMultiBrainArchitecture(): MultiBrainOrchestrator.Architecture = when (credentialStore.getMultiBrainArchitecture()) {
+        "GROQ_HF" -> MultiBrainOrchestrator.Architecture.GROQ_HF
+        else -> MultiBrainOrchestrator.Architecture.GROQ_HF_GEMINI
     }
 
     fun clearChatHistory() {
