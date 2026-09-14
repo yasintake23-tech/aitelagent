@@ -39,16 +39,19 @@ jobs:
             cp .env.example .env
           fi
 
-      - name: Setup Android SDK 36
-        run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          accept-android-sdk-licenses: true
 
-      - name: Make Gradle Wrapper
+      - name: Verify Android toolchain
         run: |
-          if [ ! -f "./gradlew" ]; then
-            gradle wrapper --gradle-version 9.3.1
-          fi
+          java -version
+          sdkmanager --version
+          adb version
+          test -d "${ANDROID_SDK_ROOT}/platforms/android-36"
+          test -d "${ANDROID_SDK_ROOT}/build-tools/36.0.0"
           chmod +x gradlew
 
       - name: Build Debug APK
