@@ -187,7 +187,7 @@ object DeviceAgentExecutor {
         val snapshot = service.updateLiveSnapshot()
 
         val grounding = VisualGroundingEngine.locateTargetOnScreen(
-            apiKey = CredentialStore(context).getApiKey("gemini"),
+            apiKey = CredentialStore(service).getApiKey("gemini"),
             bitmap = screenshot,
             targetDescription = query,
             candidateNodes = snapshot.clickableNodes,
