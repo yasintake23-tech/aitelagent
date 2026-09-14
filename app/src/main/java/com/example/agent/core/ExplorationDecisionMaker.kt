@@ -216,6 +216,6 @@ object ExplorationDecisionMaker {
             it.node.text.isNotBlank() || it.node.contentDescription.isNotBlank()
         }
 
-        return namedCandidate ?: candidates.firstOrNull()
+        return namedCandidate
     }
 }
