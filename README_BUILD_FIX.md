@@ -1,17 +1,15 @@
-# Build Fix Notes
+# Build Fix
 
-## Toolchain
-- Android Gradle Plugin: 9.1.1
-- Gradle Wrapper: 9.3.1
-- JDK: 17
-- compileSdk/targetSdk: 36
-- Kotlin: 2.2.10 (AGP 9 built-in Kotlin)
-- KSP: 2.2.10-2.0.2 (matched to AGP 9 built-in Kotlin)
+## Root cause
+GitHub Actions reached Gradle successfully, but `app/build.gradle.kts` failed during Kotlin DSL script compilation:
 
-## CI hardening
-- GitHub Actions explicitly installs Android API 36 and Build Tools 36.0.0.
-- Configuration cache is disabled to avoid plugin/annotation-processing cache instability while stabilizing CI.
-- Debug keystore generation remains deterministic.
+- line 60: `kotlin {` -> unresolved reference
+- line 61: `jvmToolchain(17)` -> unresolved reference
 
-## Why KSP was changed
-AGP 9.x uses built-in Kotlin 2.2.10. Android's AGP documentation states that this is the bundled KGP and identifies KSP 2.2.10-2.0.2 as the matching baseline.
+The module was applying the Kotlin Compose compiler plugin but not the Kotlin Android plugin, so the Kotlin Android Gradle extension was not available to the module script.
+
+## Fix
+Added `org.jetbrains.kotlin.android` (Kotlin 2.2.10) to the version catalog and applied it to the root/app plugin blocks. The existing Java/Kotlin JVM 17 configuration is retained.
+
+## Verification
+The exact previous CI log was inspected and the fix targets the reported script-compilation error directly. A local Gradle build could not be executed in this sandbox because outbound network access prevents downloading the Gradle 8.13 distribution; GitHub Actions has network access and the workflow's SDK/toolchain setup is already in place.
