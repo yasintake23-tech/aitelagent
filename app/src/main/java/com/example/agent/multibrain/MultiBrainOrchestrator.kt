@@ -63,7 +63,7 @@ class MultiBrainOrchestrator(
         }
     }
 
-    suspend fun coordinate(goal: String, context: ScreenContext, taskId: String): AgentMessage {
+    suspend fun coordinate(goal: String, context: ScreenContext, taskId: String): AgentMessage = coordinationMutex.withLock {
         resetTask(taskId)
         Log.d(tag, "Council started task=$taskId goal=$goal architecture=$currentArchitecture")
 
@@ -75,8 +75,15 @@ class MultiBrainOrchestrator(
         if (currentProposal.messageType == AgentMessageType.ERROR) {
             return createReplan(taskId, "Groq Reasoning sağlayıcısı başarısız oldu.", "REASONING_PROVIDER_ERROR")
         }
-        messages.add(currentProposal)
+        remember(currentProposal)
         AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "Groq initial proposal: ${currentProposal.proposedAction?.actionType}") }
+
+        // REPLAN/NO_ACTION is already a terminal decision for this council turn.
+        // Do not trigger another Vision/Groq/Gemini round for an invalid proposal.
+        when (currentProposal.proposedAction?.actionType) {
+            AgentActionType.REPLAN, AgentActionType.NO_ACTION -> return@withLock currentProposal
+            else -> Unit
+        }
 
         // 2) HF Vision: seçili 2/3-beyin mimarisinde her fiziksel adım için görsel grounding.
         val vision = visionBrain
@@ -85,17 +92,13 @@ class MultiBrainOrchestrator(
             return createReplan(taskId, "Multi-Brain fiziksel görev için canlı ekran görüntüsü gerekli.", "VISION_SCREENSHOT_MISSING")
         }
 
-        val visionRequired = currentProposal.structuredPayload["visionRequired"]?.toBooleanStrictOrNull() == true
-        val targetMissing = currentProposal.structuredPayload["targetMissing"]?.toBooleanStrictOrNull() == true
-        val observation = if (visionRequired || targetMissing || currentProposal.confidence < 0.99) {
-            vision.analyzeScreen(context, currentProposal.proposedAction?.target).withTask(taskId)
-        } else {
-            AgentMessage(taskId, sender = "HF_VISION", receiver = "ORCHESTRATOR", messageType = AgentMessageType.OBSERVATION, decisionSummary = "Vision gereksiz olarak işaretlendi; ekran ağacı yeterli.", confidence = 1.0, structuredPayload = mapOf("skipped" to "true"))
-        }
+        // Use Vision as a real witness for every actionable proposal. This avoids trusting
+        // an overconfident text-only decision and keeps coordinate grounding alive.
+        val observation = vision.analyzeScreen(context, currentProposal.proposedAction?.target).withTask(taskId)
         if (observation.messageType == AgentMessageType.ERROR) {
             return createReplan(taskId, "Vision sağlayıcısı başarısız oldu; başka AI'ya gizli geçiş yapılmayacak.", observation.errorCode ?: "VISION_PROVIDER_ERROR")
         }
-        messages.add(observation)
+        remember(observation)
         AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "HF Vision: found=${observation.structuredPayload["found"]}; confidence=${observation.confidence}") }
 
         // 3) Groq: HF grounding bilgisini okuyup tek bir son ActionProposal üretir.
@@ -105,8 +108,13 @@ class MultiBrainOrchestrator(
             return createReplan(taskId, "Vision sonrası Groq yeniden değerlendirmesi başarısız oldu.", "REFINEMENT_PROVIDER_ERROR")
         }
         currentProposal = refined
-        messages.add(currentProposal)
+        remember(currentProposal)
         AiDeviceAccessibilityService.instance?.applicationContext?.let { AgentLogStore.record(it, "INFO", tag, "Groq refinement: ${currentProposal.proposedAction?.actionType}") }
+
+        if (currentProposal.proposedAction?.actionType == AgentActionType.REPLAN ||
+            currentProposal.proposedAction?.actionType == AgentActionType.NO_ACTION) {
+            return@withLock currentProposal
+        }
 
         // 4) Gemini: 3-beyin mimarisinde her fiziksel adım için bağımsız ikinci görüş.
         if (currentArchitecture == Architecture.GROQ_HF_GEMINI) {
@@ -137,7 +145,14 @@ class MultiBrainOrchestrator(
             }
         }
 
-        return currentProposal.withTask(taskId)
+        return@withLock currentProposal.withTask(taskId)
+    }
+
+    private fun remember(message: AgentMessage) {
+        messages.add(message)
+        if (messages.size > 12) {
+            messages.subList(0, messages.size - 12).clear()
+        }
     }
 
     private fun createReplan(taskId: String, message: String, code: String): AgentMessage = AgentMessage(
