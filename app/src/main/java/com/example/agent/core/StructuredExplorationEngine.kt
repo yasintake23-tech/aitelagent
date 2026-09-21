@@ -15,6 +15,7 @@ import com.example.data.security.CredentialStore
 import com.example.data.security.AgentLogStore
 import com.example.service.AiDeviceAccessibilityService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -107,6 +108,9 @@ object StructuredExplorationEngine {
             model = selectedModel
         )
 
+        var consecutiveProviderReplans = 0
+        var consecutiveNonProgressReplans = 0
+
         // 1. Ekran donanım bilgisini ilk hafıza kaydı olarak kaydet
         withContext(Dispatchers.IO) {
             database.memoryDao().insertMemory(
@@ -174,6 +178,8 @@ object StructuredExplorationEngine {
                     model = selectedModel
                 )
 
+                consecutiveProviderReplans = 0
+                consecutiveNonProgressReplans = 0
                 onStatusUpdate(proposal.reason.ifBlank { "Ekran inceleniyor..." })
                 Log.d(TAG, "Adım ${session.stepCount} Kararı: ${proposal.actionType}, Açıklama: ${proposal.reason}")
                 AgentLogStore.record(context, "INFO", TAG, "Step ${session.stepCount}: ${proposal.actionType}; target=${proposal.target}; x=${proposal.x}; y=${proposal.y}")
@@ -197,9 +203,49 @@ object StructuredExplorationEngine {
                 }
 
                 if (proposal.actionType == BrainActionType.REPLAN) {
-                    onStatusUpdate("Yeniden planlanıyor...")
-                    AgentLifecycleManager.transitionState(centralSession.taskId, AgentState.RECOVERING, session.stepCount, "Yeniden planlanıyor...")
-                    activeBrain.replan(snapshot, apiKey, activeProviderId, selectedModel)
+                    val lowerReason = proposal.reason.lowercase(Locale("tr", "TR"))
+                    val providerFailure = lowerReason.contains("provider") ||
+                        lowerReason.contains("api_key") ||
+                        lowerReason.contains("multi_brain_error") ||
+                        lowerReason.contains("vision") ||
+                        lowerReason.contains("screenshot")
+
+                    if (providerFailure) {
+                        consecutiveProviderReplans++
+                        if (consecutiveProviderReplans >= 2) {
+                            val terminal = "Keşif sırasında AI sağlayıcı zinciri iki kez başarısız oldu: ${proposal.reason}"
+                            session.currentState = AgentState.FAILED
+                            AgentLifecycleManager.failSession(centralSession.taskId, terminal)
+                            onStatusUpdate(terminal)
+                            break
+                        }
+                        onStatusUpdate("AI sağlayıcısı yeniden deneniyor (${consecutiveProviderReplans}/2)...")
+                        AgentLifecycleManager.transitionState(
+                            centralSession.taskId,
+                            AgentState.RECOVERING,
+                            session.stepCount,
+                            "Sağlayıcı hatası sonrası kontrollü yeniden deneme"
+                        )
+                        delay(2200L)
+                    } else {
+                        consecutiveNonProgressReplans++
+                        if (consecutiveNonProgressReplans >= 3) {
+                            val terminal = "Keşif aynı noktada ilerleyemedi ve güvenli biçimde durduruldu."
+                            session.currentState = AgentState.FAILED
+                            AgentLifecycleManager.failSession(centralSession.taskId, terminal)
+                            onStatusUpdate(terminal)
+                            break
+                        }
+                        onStatusUpdate("Yeniden planlanıyor (${consecutiveNonProgressReplans}/3)...")
+                        AgentLifecycleManager.transitionState(
+                            centralSession.taskId,
+                            AgentState.RECOVERING,
+                            session.stepCount,
+                            "Yeniden planlanıyor..."
+                        )
+                        activeBrain.replan(snapshot, apiKey, activeProviderId, selectedModel)
+                        delay(900L)
+                    }
                     continue
                 }
 
@@ -272,7 +318,7 @@ object StructuredExplorationEngine {
                             PointF(it.bounds.centerX().toFloat(), it.bounds.centerY().toFloat())
                         }
                         if (finalCoords != null) {
-                            service.clickAtWithVerification(finalCoords.x, finalCoords.y, proposal.target ?: "düğme", targetNode = targetNode)
+                            service.clickAtWithVerification(finalCoords.x, finalCoords.y, proposal.target ?: "düğme", targetNode = if (proposal.actionType == BrainActionType.CLICK_NODE) targetNode else null, maxRetries = 0)
                         } else {
                             service.awaitScreenSettled(800L)
                         }
@@ -402,9 +448,9 @@ object StructuredExplorationEngine {
                 delay(600)
             }
 
-            // Keşif tamamlandı
-            service.goHome()
+            // Kullanıcı iptal ettiyse cihazı zorla ana ekrana göndermiyoruz.
             if (session.currentState != AgentState.CANCELLED && session.currentState != AgentState.FAILED) {
+                service.goHome()
                 session.currentState = AgentState.COMPLETED
             }
 
@@ -420,6 +466,12 @@ object StructuredExplorationEngine {
             onStatusUpdate(summaryMsg)
             onFinished(session.progress.memoriesLearnedCount)
 
+        } catch (e: CancellationException) {
+            Log.i(TAG, "Exploration cancelled by user/system.")
+            AgentLogStore.record(context, "INFO", TAG, "Exploration cancelled.")
+            session.cancel("Kullanıcı tarafından durduruldu.")
+            onStatusUpdate("Keşif durduruldu.")
+            onFinished(session.progress.memoriesLearnedCount)
         } catch (e: Exception) {
             Log.e(TAG, "Exploration execution error", e)
             AgentLogStore.record(context, "ERROR", TAG, "Exploration execution error: ${e.localizedMessage}")
