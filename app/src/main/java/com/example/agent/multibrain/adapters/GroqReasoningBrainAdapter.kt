@@ -77,6 +77,7 @@ class GroqReasoningBrainAdapter(
               "proposedAction": {
                 "type": "CLICK_NODE|CLICK_COORD|TYPE_TEXT|SWIPE_DOWN|SWIPE_UP|SWIPE_LEFT|SWIPE_RIGHT|PRESS_BACK|PRESS_HOME|OPEN_APP|COMPLETE|REPLAN|NO_ACTION",
                 "targetId": "metin veya viewId",
+                "targetIndex": null,
                 "text": "yazılacak metin veya null",
                 "x": null,
                 "y": null
@@ -107,7 +108,23 @@ class GroqReasoningBrainAdapter(
             val json = parseJsonObject(response)
             
             val actionJson = json.optJSONObject("proposedAction")
-            val actionType = actionJson?.optString("type", AgentActionType.NO_ACTION) ?: AgentActionType.NO_ACTION
+            val rawActionType = actionJson?.optString("type", AgentActionType.NO_ACTION) ?: AgentActionType.NO_ACTION
+            val allowedActions = setOf(
+                AgentActionType.CLICK_NODE,
+                AgentActionType.CLICK_COORD,
+                AgentActionType.TYPE_TEXT,
+                AgentActionType.SWIPE_DOWN,
+                AgentActionType.SWIPE_UP,
+                AgentActionType.SWIPE_LEFT,
+                AgentActionType.SWIPE_RIGHT,
+                AgentActionType.PRESS_BACK,
+                AgentActionType.PRESS_HOME,
+                AgentActionType.OPEN_APP,
+                AgentActionType.COMPLETE,
+                AgentActionType.REPLAN,
+                AgentActionType.NO_ACTION
+            )
+            val actionType = rawActionType.takeIf { it in allowedActions } ?: AgentActionType.NO_ACTION
             
             val rawTarget = actionJson?.optString("targetId")?.trim().orEmpty()
             val targetIndex = if (actionJson?.has("targetIndex") == true && !actionJson.isNull("targetIndex")) actionJson.optInt("targetIndex") else null
