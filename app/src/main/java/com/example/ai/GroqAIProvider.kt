@@ -213,7 +213,52 @@ class GroqAIProvider(
         rootJson.put("model", selectedModel)
         rootJson.put("messages", messagesArr)
         rootJson.put("temperature", 0.0)
-        rootJson.put("response_format", JSONObject().put("type", "json_object"))
+        rootJson.put("reasoning_effort", "low")
+
+        // All currently selectable autonomous Groq models support strict Structured Outputs.
+        // Force the council response into the ActionProposal contract instead of relying on
+        // best-effort JSON parsing.
+        val actionTypes = JSONArray().apply {
+            listOf(
+                "CLICK_NODE", "CLICK_COORD", "TYPE_TEXT",
+                "SWIPE_DOWN", "SWIPE_UP", "SWIPE_LEFT", "SWIPE_RIGHT",
+                "PRESS_BACK", "PRESS_HOME", "OPEN_APP", "COMPLETE",
+                "REPLAN", "NO_ACTION"
+            ).forEach { put(it) }
+        }
+        val actionProperties = JSONObject()
+            .put("type", JSONObject().put("type", "string").put("enum", actionTypes))
+            .put("targetId", JSONObject().put("type", JSONArray().put("string").put("null")))
+            .put("targetIndex", JSONObject().put("type", JSONArray().put("integer").put("null")))
+            .put("text", JSONObject().put("type", JSONArray().put("string").put("null")))
+            .put("x", JSONObject().put("type", JSONArray().put("integer").put("null")))
+            .put("y", JSONObject().put("type", JSONArray().put("integer").put("null")))
+        val actionSchema = JSONObject()
+            .put("type", "object")
+            .put("properties", actionProperties)
+            .put("required", JSONArray().apply {
+                listOf("type", "targetId", "targetIndex", "text", "x", "y").forEach { put(it) }
+            })
+            .put("additionalProperties", false)
+        val rootSchema = JSONObject()
+            .put("type", "object")
+            .put("properties", JSONObject()
+                .put("decisionSummary", JSONObject().put("type", "string"))
+                .put("confidence", JSONObject().put("type", "number").put("minimum", 0.0).put("maximum", 1.0))
+                .put("riskLevel", JSONObject().put("type", "string").put("enum", JSONArray().put("SAFE").put("SENSITIVE").put("HIGH_RISK")))
+                .put("visionRequired", JSONObject().put("type", "boolean"))
+                .put("targetMissing", JSONObject().put("type", "boolean"))
+                .put("proposedAction", actionSchema))
+            .put("required", JSONArray().apply {
+                listOf("decisionSummary", "confidence", "riskLevel", "visionRequired", "targetMissing", "proposedAction").forEach { put(it) }
+            })
+            .put("additionalProperties", false)
+        rootJson.put("response_format", JSONObject()
+            .put("type", "json_schema")
+            .put("json_schema", JSONObject()
+                .put("name", "lumina_agent_decision")
+                .put("strict", true)
+                .put("schema", rootSchema)))
 
         val request = Request.Builder()
             .url("https://api.groq.com/openai/v1/chat/completions")
