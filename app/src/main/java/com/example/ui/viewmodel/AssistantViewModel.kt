@@ -489,45 +489,69 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun startAutonomousDeviceControl(durationMinutes: Int = 30, taskName: String = "Cihazı Keşfet") {
+        if (_isAgentControlling.value || AiDeviceAccessibilityService.isAgentActive.value) {
+            _explorationStatusText.value = "Zaten çalışan bir otonom görev var. Yeni görev başlatılmadı."
+            AgentLogStore.record(getApplication(), "INFO", "AssistantViewModel", "Ignored autonomous start while agent busy: $taskName")
+            return
+        }
+
+        // Claim the same single slot used by normal device tasks before launching async work.
+        _isAgentControlling.value = true
+        _orbState.value = OrbState.THINKING
+        _currentTaskName.value = taskName
+        _explorationStatusText.value = "Otonom görev hazırlanıyor..."
+
         val service = AiDeviceAccessibilityService.instance
         if (service != null) {
-            // Real on-screen touch and navigation exploration
-            speakText("$durationMinutes dakika boyunca cihazı canlı parmakla gezeceğim, arayüzü öğrenip hafızama kaydedeceğim. Dilediğin an durdur diyebilirsin.")
+            speakText("$durationMinutes dakika boyunca cihazı canlı parmakla gezeceğim, arayüzü öğrenip hafızama kaydedeceğim. Dilediğin an 'dur' diyebilirsin.")
 
             viewModelScope.launch {
-                val profile = memoryRepository.getUserProfileOnce()
-                service.startTimedAgentControl(
-                    context = getApplication<Application>(),
-                    durationMinutes = durationMinutes,
-                    taskPrompt = taskName,
-                    brain = agentBrain,
-                    profile = profile,
-                    onStatusUpdate = { status ->
-                        _explorationStatusText.value = status
-                    },
-                    onFinished = { learnedCount ->
-                        _explorationStatusText.value = "Oturum bitti ($learnedCount bilgi kaydedildi)."
-                        speakText("Cihaz kontrol oturumu tamamlandı. $learnedCount yeni bilgi hafızaya alındı. Şimdi senin komutlarını bekliyorum.")
-                    }
-                )
+                try {
+                    val profile = memoryRepository.getUserProfileOnce()
+                    service.startTimedAgentControl(
+                        context = getApplication<Application>(),
+                        durationMinutes = durationMinutes,
+                        taskPrompt = taskName,
+                        brain = agentBrain,
+                        profile = profile,
+                        onStatusUpdate = { status ->
+                            _explorationStatusText.value = status
+                        },
+                        onFinished = { learnedCount ->
+                            _explorationStatusText.value = "Oturum bitti ($learnedCount bilgi kaydedildi)."
+                            _discoveredCount.value = learnedCount
+                            _isAgentControlling.value = false
+                            _orbState.value = OrbState.IDLE
+                            _diagnosticLogs.value = AgentLogStore.read(getApplication())
+                            speakText("Cihaz kontrol oturumu tamamlandı. $learnedCount yeni bilgi hafızaya alındı. Şimdi komutlarını bekliyorum.")
+                        }
+                    )
+                } catch (e: Exception) {
+                    _isAgentControlling.value = false
+                    _orbState.value = OrbState.IDLE
+                    _explorationStatusText.value = "Otonom görev başlatılamadı: ${e.localizedMessage}"
+                    AgentLogStore.record(getApplication(), "ERROR", "AssistantViewModel", "Exploration start failed: ${e.localizedMessage}")
+                }
             }
         } else {
-            // Fallback System Diagnostic & App Explorer
+            // Accessibility kapalıysa yalnızca sistemsel tanı taraması yapılır.
             viewModelScope.launch {
-                _isAgentControlling.value = true
-                _currentTaskName.value = "Sistem ve Donanım Taraması"
-                _explorationStatusText.value = "Erişilebilirlik kapalı olduğu için donanım ve yüklü uygulamalar taranıyor..."
-                speakText("Cihaz hafızası ve donanım özellikleri inceleniyor...")
+                try {
+                    _currentTaskName.value = "Sistem ve Donanım Taraması"
+                    _explorationStatusText.value = "Erişilebilirlik kapalı olduğu için donanım ve yüklü uygulamalar taranıyor..."
+                    speakText("Cihaz hafızası ve donanım özellikleri inceleniyor...")
 
-                val learned = DeviceAgentExecutor.inspectDeviceAndLearn(getApplication())
-                _discoveredCount.value = learned.size
-                _explorationStatusText.value = "Cihaz analizi tamamlandı (${learned.size} bilgi hafızaya alındı)."
-                speakText("Cihaz analizi tamamlandı. Donanım ve yüklü uygulamaları öğrendim.")
-                _isAgentControlling.value = false
+                    val learned = DeviceAgentExecutor.inspectDeviceAndLearn(getApplication())
+                    _discoveredCount.value = learned.size
+                    _explorationStatusText.value = "Cihaz analizi tamamlandı (${learned.size} bilgi hafızaya alındı)."
+                    speakText("Cihaz analizi tamamlandı. Donanım ve yüklü uygulamaları öğrendim.")
+                } finally {
+                    _isAgentControlling.value = false
+                    _orbState.value = OrbState.IDLE
+                }
             }
         }
     }
-
     fun stopAutonomousDeviceControl() {
         viewModelScope.launch {
             AgentLifecycleManager.cancelCurrentSession("Kullanıcı tarafından durduruldu.")
