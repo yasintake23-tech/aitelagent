@@ -883,7 +883,7 @@ object DeviceAgentExecutor {
 
                 brain.workingMemory.recordFailure(currentStep, proposal.actionType, "ENGELENDİ: ${safetyDecision.reason}")
                 brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
-                currentStep++
+                delay(900L)
                 continue
             }
 
@@ -971,7 +971,8 @@ object DeviceAgentExecutor {
                             matched.bounds.centerX().toFloat(),
                             matched.bounds.centerY().toFloat(),
                             label = proposal.target,
-                            targetNode = matched
+                            targetNode = matched,
+                            maxRetries = 0
                         )
                     }
                 }
@@ -984,7 +985,8 @@ object DeviceAgentExecutor {
                         x = x.toFloat(),
                         y = y.toFloat(),
                         label = proposal.target ?: "Vision adayı",
-                        targetNode = targetNode
+                        targetNode = null,
+                        maxRetries = 0
                     )
                 }
             }
