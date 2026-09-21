@@ -34,7 +34,7 @@ class GroqAIProvider(
     override val defaultModel: String = DEFAULT_MODEL
     override val availableModels: List<String> = listOf(
         "openai/gpt-oss-120b",
-        "groq/compound",
+        "openai/gpt-oss-20b",
         "qwen/qwen3.8-27b"
     )
 
@@ -44,7 +44,7 @@ class GroqAIProvider(
 
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
