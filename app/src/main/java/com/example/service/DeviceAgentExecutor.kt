@@ -201,6 +201,7 @@ object DeviceAgentExecutor {
         var currentStep = 1
         var finalSummary = ""
         var isSuccess = false
+        var consecutiveProviderFailures = 0
 
         onStatusUpdate?.invoke("Ekran inceleniyor ve adımlar planlanıyor...")
 
@@ -681,9 +682,9 @@ object DeviceAgentExecutor {
 
         val budget = TaskBudget(
             maxSteps = maxSteps.coerceIn(1, 16),
-            maxRetriesPerStep = 2,
+            maxRetriesPerStep = 1,
             overallTimeoutMs = 300_000L,
-            perStepTimeoutMs = 30_000L,
+            perStepTimeoutMs = 45_000L,
             maxConsecutiveFailures = 3
         )
 
@@ -770,16 +771,19 @@ object DeviceAgentExecutor {
                 val message = "Multi-Brain karar turu başarısız: ${e.localizedMessage ?: "Bilinmeyen hata"}"
                 persistLog(context, "ERROR", message)
                 onStatusUpdate?.invoke(message)
+                consecutiveProviderFailures++
                 brain.workingMemory.recordFailure(currentStep, "MULTI_BRAIN", message)
-                if (brain.workingMemory.state.consecutiveFailures >= 2) {
+                if (consecutiveProviderFailures >= 2) {
                     AgentLifecycleManager.failSession(taskSession.taskId, message)
                     finalSummary = message
                     break
                 }
-                currentStep++
+                AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "AI karar turu yeniden deneniyor (${consecutiveProviderFailures}/2)...")
+                delay(2200L)
                 continue
             }
 
+            consecutiveProviderFailures = 0
             Log.i(TAG, "Brain Proposal: type=${proposal.actionType}, target=${proposal.target}, reason=${proposal.reason}")
             persistLog(context, "INFO", "Proposal type=${proposal.actionType}; target=${proposal.target}; reason=${proposal.reason}")
 
@@ -794,7 +798,7 @@ object DeviceAgentExecutor {
                     Log.w(TAG, "Task COMPLETE teklifi ekran doğrulamasından geçemedi. RePlan yapılıyor.")
                     brain.workingMemory.recordFailure(currentStep, "COMPLETE", "Ekran tamamlanma kriterini doğrulamıyor.")
                     brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
-                    currentStep++
+                    delay(900L)
                     continue
                 }
             }
@@ -808,17 +812,17 @@ object DeviceAgentExecutor {
                     lowerReason.contains("screenshot")
 
                 if (providerFailure) {
+                    consecutiveProviderFailures++
                     brain.workingMemory.recordFailure(currentStep, "PLANNING", proposal.reason)
-                    val failures = brain.workingMemory.state.consecutiveFailures
-                    if (failures >= 2) {
+                    if (consecutiveProviderFailures >= 2) {
                         val terminal = "AI karar zinciri iki kez başarısız oldu: ${proposal.reason}"
                         AgentLifecycleManager.failSession(taskSession.taskId, terminal)
                         finalSummary = terminal
                         break
                     }
-                    onStatusUpdate?.invoke("AI sağlayıcısı yanıt vermedi; kontrollü yeniden deneniyor (${failures}/2)...")
+                    onStatusUpdate?.invoke("AI sağlayıcısı yanıt vermedi; kontrollü yeniden deneniyor (${consecutiveProviderFailures}/2)...")
                     AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Sağlayıcı hatası sonrası kontrollü yeniden deneme")
-                    delay(1500L)
+                    delay(2200L)
                 } else {
                     onStatusUpdate?.invoke("Yeniden planlanıyor...")
                     AgentLifecycleManager.transitionState(taskSession.taskId, AgentState.RECOVERING, currentStep, "Yeniden planlanıyor...")
@@ -830,9 +834,8 @@ object DeviceAgentExecutor {
                         finalSummary = terminal
                         break
                     }
-                    delay(700L)
+                    delay(900L)
                 }
-                currentStep++
                 continue
             }
 
@@ -861,7 +864,7 @@ object DeviceAgentExecutor {
                 onStatusUpdate?.invoke(failMsg)
                 brain.workingMemory.recordFailure(currentStep, proposal.actionType, "Hedef öge ekranda yok.")
                 brain.replan(beforeSnapshot, apiKey, activeProviderId, selectedModel)
-                currentStep++
+                delay(900L)
                 continue
             }
 
@@ -921,8 +924,11 @@ object DeviceAgentExecutor {
             currentStep++
         }
 
+        val wasCancelled = taskSession.isCancelled || taskSession.currentState == AgentState.CANCELLED || AgentLifecycleManager.currentSession.value?.isCancelled == true
         val finalIsSuccess = isSuccess || (taskSession.currentState == AgentState.COMPLETED)
-        if (finalIsSuccess) {
+        if (wasCancelled) {
+            AgentExecutionResult(false, "AGENT_CANCELLED", "Görev durduruldu.", "AgentBrain loop cancelled by user/system.")
+        } else if (finalIsSuccess) {
             AgentExecutionResult(
                 isSuccess = true,
                 actionType = "AGENT_BRAIN_SUCCESS",
@@ -954,7 +960,7 @@ object DeviceAgentExecutor {
                 if (targetNode != null) {
                     val cx = targetNode.bounds.centerX().toFloat()
                     val cy = targetNode.bounds.centerY().toFloat()
-                    service.clickAtWithVerificationResult(cx, cy, label = proposal.target ?: "düğme", targetNode = targetNode)
+                    service.clickAtWithVerificationResult(cx, cy, label = proposal.target ?: "düğme", targetNode = targetNode, maxRetries = 0)
                 } else if (!proposal.target.isNullOrBlank()) {
                     val matched = snapshot.clickableNodes.find {
                         val label = it.text.ifBlank { it.contentDescription }
