@@ -131,6 +131,29 @@ class AgentBrain(
         val taskSpec = currentTaskSpec ?: TaskSpec(originalGoal = workingMemory.state.originalGoal)
         Log.w(TAG, "Yeniden planlama (REPLAN) tetiklendi. Goal: '${taskSpec.originalGoal}'")
 
+        if (isMultiBrainEnabled) {
+            val newPlan = AgentPlan(
+                originalGoal = taskSpec.originalGoal,
+                targetApp = taskSpec.targetApp,
+                targetEntity = taskSpec.targetEntity,
+                requestedAction = taskSpec.requestedAction,
+                subGoals = listOf(
+                    SubGoal(
+                        id = 0,
+                        description = taskSpec.originalGoal,
+                        expectedOutcome = "Kullanıcının ana hedefi gerçekleşmiş olmalı."
+                    )
+                ),
+                completionCriteria = "Kullanıcının ana hedefi doğrulanmalı."
+            )
+            currentPlan = newPlan
+            workingMemory.setPlan(
+                plan = newPlan.subGoals.map { it.description },
+                subGoal = newPlan.currentSubGoal?.description
+            )
+            return newPlan
+        }
+
         val newPlan = planner.createPlan(
             taskSpec = taskSpec,
             workingMemory = workingMemory,
