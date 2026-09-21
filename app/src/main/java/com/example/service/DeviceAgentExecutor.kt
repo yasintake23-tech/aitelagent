@@ -783,7 +783,6 @@ object DeviceAgentExecutor {
                 continue
             }
 
-            consecutiveProviderFailures = 0
             Log.i(TAG, "Brain Proposal: type=${proposal.actionType}, target=${proposal.target}, reason=${proposal.reason}")
             persistLog(context, "INFO", "Proposal type=${proposal.actionType}; target=${proposal.target}; reason=${proposal.reason}")
 
@@ -845,6 +844,8 @@ object DeviceAgentExecutor {
                 finalSummary = noActMsg
                 break
             }
+
+            consecutiveProviderFailures = 0
 
             // 3. SAFETY GUARDIAN GATE
             val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in beforeSnapshot.clickableNodes.indices) {
@@ -1022,14 +1023,16 @@ object DeviceAgentExecutor {
                         targetNode.bounds.centerX().toFloat(),
                         targetNode.bounds.centerY().toFloat(),
                         label = proposal.target ?: "uygulama",
-                        targetNode = targetNode
+                        targetNode = targetNode,
+                        maxRetries = 0
                     )
                 } else if (proposal.x != null && proposal.y != null) {
                     service.clickAtWithVerificationResult(
                         proposal.x.toFloat(),
                         proposal.y.toFloat(),
                         label = proposal.target ?: "Vision uygulama adayı",
-                        targetNode = null
+                        targetNode = null,
+                        maxRetries = 0
                     )
                 } else {
                     Log.w("DeviceAgentExecutor", "Rejected ungrounded OPEN_APP proposal: ${proposal.target}")
