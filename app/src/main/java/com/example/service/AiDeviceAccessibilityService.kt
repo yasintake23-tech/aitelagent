@@ -176,6 +176,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
 
     private val screenshotMutex = Mutex()
     @Volatile private var lastSuccessfulScreenshotAtMs: Long = 0L
+    @Volatile private var lastScreenshotRequestAtMs: Long = 0L
     private var lastScreenshotFailureAtMs: Long = 0L
 
     /**
@@ -189,15 +190,18 @@ class AiDeviceAccessibilityService : AccessibilityService() {
             val now = System.currentTimeMillis()
             val cached = _liveScreenshotBitmap.value
             val sinceLastSuccess = now - lastSuccessfulScreenshotAtMs
-            val minimumIntervalMs = if (forceRefresh) 1200L else 1600L
+            val sinceLastRequest = now - lastScreenshotRequestAtMs
+            // Keep a wider platform-safe gap around takeScreenshot().
+            val minimumIntervalMs = if (forceRefresh) 2000L else 2200L
 
-            if (!forceRefresh && cached != null && sinceLastSuccess in 0 until minimumIntervalMs) {
+            if (!forceRefresh && cached != null && sinceLastRequest in 0 until minimumIntervalMs) {
                 return@withContext cached
             }
 
-            if (forceRefresh && cached != null && sinceLastSuccess < minimumIntervalMs) {
-                delay(minimumIntervalMs - sinceLastSuccess)
+            if (sinceLastRequest < minimumIntervalMs) {
+                delay(minimumIntervalMs - sinceLastRequest)
             }
+            lastScreenshotRequestAtMs = System.currentTimeMillis()
 
             suspend fun takeOnce(): Bitmap? {
                 val deferred = CompletableDeferred<Bitmap?>()
@@ -245,8 +249,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
 
             var bitmap = takeOnce()
             if (bitmap == null && cached == null) {
-                // Error 3 is a rate-limit style condition; wait before one controlled retry.
-                delay(1400L)
+                // Retry only after another full platform-safe interval.
+                delay(minimumIntervalMs)
+                lastScreenshotRequestAtMs = System.currentTimeMillis()
                 bitmap = takeOnce()
             }
 
@@ -441,7 +446,7 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         y: Float,
         label: String = "",
         targetNode: ScreenNodeData? = null,
-        maxRetries: Int = 2
+        maxRetries: Int = 0
     ): VerificationResult = withContext(Dispatchers.Main) {
         val beforeSnapshot = inspectCurrentScreen()
         val beforeScreenshot = captureLiveScreenshotAsync()
@@ -462,10 +467,9 @@ class AiDeviceAccessibilityService : AccessibilityService() {
                     beforeBitmap = beforeScreenshot,
                     afterBitmap = afterScreenshot
                 )
-                if (result.isSuccess) {
-                    Log.d("AiAccessibility", "Native click ActionVerifier SUCCESS: ${result.reason}")
-                    return@withContext result
-                }
+                Log.d("AiAccessibility", "Native click verification: ${result.reason} (isSuccess=${result.isSuccess})")
+                // Native ACTION_CLICK already happened. Never send a second gesture click.
+                return@withContext result
             }
         }
 
@@ -860,7 +864,10 @@ class AiDeviceAccessibilityService : AccessibilityService() {
         onStatusUpdate: (String) -> Unit,
         onFinished: (learnedCount: Int) -> Unit
     ) {
-        agentJob?.cancel()
+        if (_isAgentActive.value || (agentJob?.isActive == true)) {
+            onStatusUpdate("Zaten çalışan bir otonom görev var. Yeni görev başlatılmadı.")
+            return
+        }
 
         val totalSeconds = if (durationMinutes <= 0) 120 else durationMinutes * 60
         _totalControlDurationSeconds.value = totalSeconds
