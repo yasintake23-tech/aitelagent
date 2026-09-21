@@ -178,8 +178,6 @@ object StructuredExplorationEngine {
                     model = selectedModel
                 )
 
-                consecutiveProviderReplans = 0
-                consecutiveNonProgressReplans = 0
                 onStatusUpdate(proposal.reason.ifBlank { "Ekran inceleniyor..." })
                 Log.d(TAG, "Adım ${session.stepCount} Kararı: ${proposal.actionType}, Açıklama: ${proposal.reason}")
                 AgentLogStore.record(context, "INFO", TAG, "Step ${session.stepCount}: ${proposal.actionType}; target=${proposal.target}; x=${proposal.x}; y=${proposal.y}")
@@ -248,6 +246,9 @@ object StructuredExplorationEngine {
                     }
                     continue
                 }
+
+                consecutiveProviderReplans = 0
+                consecutiveNonProgressReplans = 0
 
                 // 4. SAFETY GUARDIAN GATE
                 val targetNode = if (proposal.targetIndex != null && proposal.targetIndex in snapshot.clickableNodes.indices) {
