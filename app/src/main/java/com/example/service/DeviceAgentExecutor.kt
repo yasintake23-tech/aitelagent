@@ -201,7 +201,6 @@ object DeviceAgentExecutor {
         var currentStep = 1
         var finalSummary = ""
         var isSuccess = false
-        var consecutiveProviderFailures = 0
 
         onStatusUpdate?.invoke("Ekran inceleniyor ve adımlar planlanıyor...")
 
@@ -715,6 +714,7 @@ object DeviceAgentExecutor {
         }
 
         val planDesc = plan.currentSubGoal?.description ?: "Görev başlatıldı."
+        var consecutiveProviderFailures = 0
         AgentLifecycleManager.transitionState(
             taskSession.taskId,
             AgentState.PLANNING,
